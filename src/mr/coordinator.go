@@ -30,6 +30,7 @@ type Coordinator struct {
 	ReduceNum int
 	MapNum int
 	Mu sync.Mutex
+	TaskLock []sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -58,7 +59,6 @@ func (c *Coordinator) GenMapTask(files []string) {
 			TaskState: Ready,
 			Files: input,
 			ReduceNum: c.ReduceNum,
-			StartTime: time.Now().UnixMilli(),
 		}
 		fmt.Println("make reduce task, taskid:", id)
 		c.TaskChannel <- &mapTask
@@ -96,7 +96,6 @@ func (c *Coordinator) GenReduceTask() {
 			Files: input,
 			ReduceNum: c.ReduceNum,
 			ReduceIdx: id - c.MapNum,
-			StartTime: time.Now().UnixMilli(),
 		}
 		fmt.Println("make reduce task, taskid:", id)
 		c.TaskChannel <- &reduceTask
@@ -151,23 +150,28 @@ func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
 		return nil
 	}
 
-	defer c.Mu.Unlock()
-	c.Mu.Lock()
 	if len(c.TaskChannel) > 0 {
 		taskp := <- c.TaskChannel
+		c.TaskLock[taskp.TaskId].Lock()
 		if taskp.TaskState == Ready {
 			reply.Answer = TaskGetted
 			reply.ResTask = *taskp
 			c.TaskMap[taskp.TaskId] = taskp
 			taskp.TaskState = Working
+			taskp.StartTime = time.Now()
 			fmt.Printf("Task[%d] has been assigned.\n", taskp.TaskId)
 		}
+		c.TaskLock[taskp.TaskId].Unlock()
 	} else {
 		reply.Answer = TaskWait
+		
+		c.Mu.Lock()
 
 		if c.TaskDone() {
 			c.NextPhase()
 		}
+
+		c.Mu.Unlock()
 	}
 	
 	return nil
@@ -180,20 +184,41 @@ func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
 func (c *Coordinator) UpdateTaskState(args *FinishArgs, reply *FinishReply) error {
 	id := args.TaskId
 	taskp := c.TaskMap[id]
-	taskp.TaskState = Finished
+
+	c.TaskLock[id].Lock()
+	defer c.TaskLock[id].Unlock()
+
+	if taskp.TaskState == Working {
+		taskp.TaskState = Finished
+	}
 	return nil
 }
 
 //
-// an example RPC handler.
+// when a task working time more than the limit, coordinator will reset the task and redistribute to others
 //
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
+func (c *Coordinator) CrashHandler() {
+	for {
+		if c.TaskPhase == AllDone {
+			return
+		}
+		// if now - start > 10s, reset task
+		for _, task := range c.TaskMap {
 
+			c.TaskLock[task.TaskId].Lock()
+
+			if task.TaskState == Working && time.Since(task.StartTime) > time.Second * 10 {
+				task.TaskState = Ready
+				c.TaskChannel <- task
+				delete(c.TaskMap, task.TaskId)
+			}
+
+			c.TaskLock[task.TaskId].Unlock()
+		}
+
+		time.Sleep(time.Second * 3)
+	}
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -228,15 +253,20 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		TaskMap: make(map[int]*Task, len(files) + nReduce),
 		ReduceNum: nReduce,
 		MapNum: len(files),
+		TaskLock: make([]sync.Mutex, len(files) + nReduce),
 	}
 	
 	c.GenMapTask(files)
+
+	go c.CrashHandler()
 
 	c.server()
 	return &c
 }
 //
 func (c *Coordinator) Done() bool {
+	c.Mu.Lock()
+	defer c.Mu.Unlock()
 	// Your code here.
 	return c.TaskPhase == AllDone
 }

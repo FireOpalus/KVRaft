@@ -57,13 +57,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			case MapTask: DoMapTask(workerTask, mapf)
 			case ReduceTask: DoReduceTask(workerTask, reducef)
 			}
-			RequestFinish(workerTask.TaskId)
+			alive = RequestFinish(workerTask.TaskId)
 		case TaskFinish:
 			alive = false
 		case TaskWait:
 			time.Sleep(time.Millisecond * 500)
 		default:
-			log.Fatalf("request task error")
+			log.Printf("time out")
+			alive = false
 		}
 	}
 }
@@ -194,49 +195,17 @@ func RequestTask(workerTask *Task) TaskResponseFlag {
 		}
 		return reply.Answer
 	} 
-	return TaskFailed
+	return TaskTimeOut
 }
 
 //
 // function to make an RPC call to the coordinator for the task-finish report
 //
-func RequestFinish(taskId int) {
+func RequestFinish(taskId int) bool {
 	args := FinishArgs{TaskId: taskId}
 	reply := FinishReply{}
 
-	ok := call("Coordinator.UpdateTaskState", &args, &reply)
-	if !ok {
-		log.Fatalf("cannot report task finish")
-	}
-}
-
-//
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
-	}
+	return call("Coordinator.UpdateTaskState", &args, &reply)
 }
 
 //
@@ -249,7 +218,8 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Printf("Error dialing RPC: %v", err)
+		return false
 	}
 	defer c.Close()
 

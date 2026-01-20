@@ -9,6 +9,7 @@ package mr
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 //
@@ -44,7 +45,7 @@ const (
 	TaskGetted TaskResponseFlag = iota	// 成功得到一个 Task
 	TaskWait							// 目前没有空闲的 Task
 	TaskFinish							// 所有 Task 已经完成，可以退出
-	TaskFailed							// 未成功得到 Task
+	TaskTimeOut							// Task 相关请求超时
 )
 
 type Task struct {
@@ -54,7 +55,7 @@ type Task struct {
 	Files []string
 	ReduceNum int						// nReduce 用于 Map 任务 ihash 输出中间文件
 	ReduceIdx int						// idx 用于标明该 Reduce 任务编号
-	StartTime int64
+	StartTime time.Time
 }
 
 // Request for Task
