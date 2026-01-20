@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 //
 // example to show how to declare the arguments
@@ -52,6 +54,7 @@ type Task struct {
 	Files []string
 	ReduceNum int						// nReduce 用于 Map 任务 ihash 输出中间文件
 	ReduceIdx int						// idx 用于标明该 Reduce 任务编号
+	StartTime int64
 }
 
 // Request for Task

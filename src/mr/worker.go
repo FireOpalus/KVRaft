@@ -55,10 +55,9 @@ func Worker(mapf func(string, string) []KeyValue,
 		case TaskGetted:
 			switch workerTask.TaskType {
 			case MapTask: DoMapTask(workerTask, mapf)
-						RequestFinish(workerTask.TaskId)
 			case ReduceTask: DoReduceTask(workerTask, reducef)
-						RequestFinish(workerTask.TaskId)
 			}
+			RequestFinish(workerTask.TaskId)
 		case TaskFinish:
 			alive = false
 		case TaskWait:
@@ -101,13 +100,15 @@ func DoMapTask(workerTask *Task, mapf func(string, string) []KeyValue) {
 	rn := workerTask.ReduceNum
 	for i := 0; i < rn; i++ {
 		iname := "mr-" + strconv.Itoa(workerTask.TaskId) + "-" + strconv.Itoa(i)
-		ifile, _ := os.Create(iname)
+		ifile, _ := os.CreateTemp("", "temp*")
+		// ifile, _ := os.Create(iname)
 		enc := json.NewEncoder(ifile)
 		for _, kv := range intermediate {
 			if ihash(kv.Key) % rn == i {
 				enc.Encode(&kv)
 			}
 		}
+		os.Rename(ifile.Name(), iname)
 		ifile.Close()
 	}
 }
@@ -121,7 +122,8 @@ func DoReduceTask(workerTask *Task, reducef func(string, []string) string) {
 	intermediate = shuffle(workerTask.Files)
 
 	oname := "mr-out-" + strconv.Itoa(workerTask.ReduceIdx)
-	ofile, _ := os.Create(oname)
+	ofile, _ := os.CreateTemp("", "temp*")
+	// ofile, _ := os.Create(oname)
 
 	//
 	// call Reduce on each distinct key in intermediate[],
@@ -144,7 +146,7 @@ func DoReduceTask(workerTask *Task, reducef func(string, []string) string) {
 
 		i = j
 	}
-
+	os.Rename(ofile.Name(), oname)
 	ofile.Close()
 }
 

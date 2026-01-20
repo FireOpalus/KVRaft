@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Phase int
@@ -31,6 +32,16 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
+
+//
+// generate taskid for the new task
+//
+func (c *Coordinator) GenTaskId() int {
+	res := c.NextTaskId
+	c.NextTaskId++
+	return res
+}
+
 //
 // generate map tasks
 //
@@ -46,6 +57,7 @@ func (c *Coordinator) GenMapTask(files []string) {
 			TaskState: Ready,
 			Files: input,
 			ReduceNum: c.ReduceNum,
+			StartTime: time.Now().UnixMilli(),
 		}
 		fmt.Println("make reduce task, taskid:", id)
 		c.MapTaskChannel <- &mapTask
@@ -83,6 +95,7 @@ func (c *Coordinator) GenReduceTask() {
 			Files: input,
 			ReduceNum: c.ReduceNum,
 			ReduceIdx: id - c.MapNum,
+			StartTime: time.Now().UnixMilli(),
 		}
 		fmt.Println("make reduce task, taskid:", id)
 		c.ReduceTaskChannel <- &reduceTask
@@ -99,10 +112,7 @@ func (c *Coordinator) MapTaskDone() bool {
 			mapDoneNum++
 		}
 	}
-	if mapDoneNum == c.MapNum {
-		return true
-	}
-	return false
+	return mapDoneNum == c.MapNum
 }
 
 //
@@ -115,10 +125,7 @@ func (c *Coordinator) ReduceTaskDone() bool {
 			reduceDoneNum++
 		}
 	}
-	if reduceDoneNum == c.ReduceNum {
-		return true
-	}
-	return false
+	return reduceDoneNum == c.ReduceNum
 }
 
 //
@@ -199,15 +206,6 @@ func (c *Coordinator) UpdateTaskState(args *FinishArgs, reply *FinishReply) erro
 }
 
 //
-// generate taskid for the new task
-//
-func (c *Coordinator) GenTaskId() int {
-	res := c.NextTaskId
-	c.NextTaskId++
-	return res
-}
-
-//
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
@@ -238,12 +236,6 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 //
-func (c *Coordinator) Done() bool {
-	// Your code here.
-	return c.TaskPhase == AllDone
-}
-
-//
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
@@ -265,3 +257,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.server()
 	return &c
 }
+//
+func (c *Coordinator) Done() bool {
+	// Your code here.
+	return c.TaskPhase == AllDone
+}
+
