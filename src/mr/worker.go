@@ -215,9 +215,7 @@ func RequestFinish(workerId, taskId int) bool {
 // returns false if something goes wrong.
 //
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	sockname := coordinatorSock()
-	c, err := rpc.DialHTTP("unix", sockname)
+	c, err := rpc.DialHTTP("tcp", "127.0.0.1:1234")
 	if err != nil {
 		log.Printf("Error dialing RPC: %v", err)
 		return false
