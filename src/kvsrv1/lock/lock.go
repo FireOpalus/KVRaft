@@ -33,7 +33,12 @@ func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 func (lk *Lock) Acquire() {
 	for {
 		value, version, err := lk.ck.Get(lk.Key)
-        // 尝试获取锁
+        // 重试如果发现 value 已经写进去了（已获取），直接存入
+		if value == lk.ClientId {
+			lk.Version = version
+			return 
+		}
+		// 尝试获取锁
 		if err == rpc.ErrNoKey {
 			err := lk.ck.Put(lk.Key, lk.ClientId, 0)
 			if err == rpc.OK {
@@ -57,13 +62,11 @@ func (lk *Lock) Acquire() {
 }
 
 func (lk *Lock) Release() {
-	// 检查当前锁是否由自己持有
 	for {
 		ok := lk.ck.Put(lk.Key, "", lk.Version)
-		if ok == rpc.OK {
+		if ok == rpc.OK || ok == rpc.ErrVersion {
 			return
 		}
-
 		//fmt.Printf("Client %s failed to release lock, retrying...\n", lk.ClientId)
 		time.Sleep(10 * time.Millisecond)
 	}
