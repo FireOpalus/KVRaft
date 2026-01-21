@@ -56,10 +56,13 @@ type Task struct {
 	ReduceNum int						// nReduce 用于 Map 任务 ihash 输出中间文件
 	ReduceIdx int						// idx 用于标明该 Reduce 任务编号
 	StartTime time.Time
+	WorkerId int
 }
 
 // Request for Task
-type TaskArgs struct {}					// worker 不需要向 coordinator 传输任何数据
+type TaskArgs struct {
+	WorkerId int
+}					// worker 不需要向 coordinator 传输任何数据
 
 type TaskReply struct {
 	Answer TaskResponseFlag
@@ -69,6 +72,7 @@ type TaskReply struct {
 // Request for Task complete
 type FinishArgs struct {
 	TaskId int
+	WorkerId int
 }
 
 type FinishReply struct {}

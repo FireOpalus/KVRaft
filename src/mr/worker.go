@@ -48,16 +48,17 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	workerTask := new(Task)
+	workerId := os.Getpid()
 	alive := true
 	for alive {
-		answer := RequestTask(workerTask)
+		answer := RequestTask(workerId, workerTask)
 		switch answer {
 		case TaskGetted:
 			switch workerTask.TaskType {
 			case MapTask: DoMapTask(workerTask, mapf)
 			case ReduceTask: DoReduceTask(workerTask, reducef)
 			}
-			alive = RequestFinish(workerTask.TaskId)
+			alive = RequestFinish(workerId, workerTask.TaskId)
 		case TaskFinish:
 			alive = false
 		case TaskWait:
@@ -184,7 +185,7 @@ func shuffle(files []string) []KeyValue {
 //
 // I modified the RPC argument and reply types in rpc.go.
 //
-func RequestTask(workerTask *Task) TaskResponseFlag {
+func RequestTask(workerId int, workerTask *Task) TaskResponseFlag {
 	args := TaskArgs{}
 	reply := TaskReply{}
 
@@ -201,7 +202,7 @@ func RequestTask(workerTask *Task) TaskResponseFlag {
 //
 // function to make an RPC call to the coordinator for the task-finish report
 //
-func RequestFinish(taskId int) bool {
+func RequestFinish(workerId, taskId int) bool {
 	args := FinishArgs{TaskId: taskId}
 	reply := FinishReply{}
 

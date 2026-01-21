@@ -159,6 +159,7 @@ func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
 			c.TaskMap[taskp.TaskId] = taskp
 			taskp.TaskState = Working
 			taskp.StartTime = time.Now()
+			taskp.WorkerId = args.WorkerId
 			fmt.Printf("Task[%d] has been assigned.\n", taskp.TaskId)
 		}
 		c.TaskLock[taskp.TaskId].Unlock()
@@ -188,7 +189,7 @@ func (c *Coordinator) UpdateTaskState(args *FinishArgs, reply *FinishReply) erro
 	c.TaskLock[id].Lock()
 	defer c.TaskLock[id].Unlock()
 
-	if taskp.TaskState == Working {
+	if taskp.WorkerId == args.WorkerId && taskp.TaskState == Working {
 		taskp.TaskState = Finished
 	}
 	return nil
