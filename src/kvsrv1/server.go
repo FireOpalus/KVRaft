@@ -40,7 +40,10 @@ func MakeKVServer() *KVServer {
 // Get returns the value and version for args.Key, if args.Key
 // exists. Otherwise, Get returns ErrNoKey.
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
-	// Your code here.
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
 	key := args.Key
 	kvdata, ok := kv.kvmap[key]
 	if ok {
@@ -57,7 +60,10 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 // If the key doesn't exist, Put installs the value if the
 // args.Version is 0, and returns ErrNoKey otherwise.
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
-	// Your code here.
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
 	key := args.Key
 	kvdata, ok := kv.kvmap[key]
 	if !ok {
