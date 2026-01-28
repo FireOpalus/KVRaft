@@ -66,7 +66,7 @@ type Raft struct {
 }
 
 //
-// get node latest log term and index
+// get server's latest log term and index
 //
 func (rf *Raft) getLastLogIndex() int {
 	return len(rf.log) - 1
@@ -79,6 +79,9 @@ func (rf *Raft) getLastLogTerm() int {
 	return rf.log[len(rf.log) - 1].Term
 }
 
+//
+// get server's log term which index refers to
+//
 func (rf *Raft) getLogTerm(index int) int {
 	if index < 0 || index >= len(rf.log) {
 		return -1
@@ -86,6 +89,11 @@ func (rf *Raft) getLogTerm(index int) int {
 	return rf.log[index].Term
 }
 
+//
+// get the conflict index by the AppendEntriesReply.ConflictIndex
+// find the first log entry which term = ConflictTerm in leader's log
+// to update leader's nextIndex
+//
 func (rf *Raft) findConflictIndex(conflictIndex int, conflictTerm int) int {
 	for idx := conflictIndex - 1; idx >= 1; idx-- {
 		if rf.log[idx].Term != conflictTerm {
@@ -96,7 +104,10 @@ func (rf *Raft) findConflictIndex(conflictIndex int, conflictTerm int) int {
 	return conflictIndex
 }
 
-// Find the last index with the term.
+//
+// Find the last index with the term parameter .
+// used to find the index of the last log entry of the specified term in Raft's log.
+// 
 func (rf *Raft) findTerm(term int) (bool, int) {
 	for i := len(rf.log) - 1; i >= 0; i-- {
 		t := rf.log[i].Term
@@ -111,7 +122,7 @@ func (rf *Raft) findTerm(term int) (bool, int) {
 }
 
 //
-// funcs for node to change state and initialize elements
+// funcs for server to change state and initialize elements
 //
 func (rf *Raft) BecomeFollower(term int) {
 	rf.state = Follower
@@ -122,7 +133,7 @@ func (rf *Raft) BecomeFollower(term int) {
 	}
 	rf.received = true
 
-	log.Printf("[Node %v] Becomes follower at term %v\n", rf.me, term)
+	// log.Printf("[Node %v] Becomes follower at term %v\n", rf.me, term)
 }
 
 func (rf *Raft) BecomeCandidate() {
@@ -131,7 +142,7 @@ func (rf *Raft) BecomeCandidate() {
 	rf.votedFor = rf.me
 	rf.votersNum = 1
 
-	log.Printf("[Node %v] Becomes candidate at term %v\n", rf.me, rf.currentTerm)
+	// log.Printf("[Node %v] Becomes candidate at term %v\n", rf.me, rf.currentTerm)
 }
 
 func (rf *Raft) BecomeLeader() {
@@ -145,7 +156,9 @@ func (rf *Raft) BecomeLeader() {
 	}
 
 	rf.matchIndex[rf.me] = rf.getLastLogIndex()
-	log.Printf("[Node %v] Becomes leader at term %v\n", rf.me, rf.currentTerm)
+	// log.Printf("[Node %v] Becomes leader at term %v\n", rf.me, rf.currentTerm)
+
+	// when state change complete, broadcast heartbeat immediately
 	go rf.HeartbeatBroadcast()
 }
 
@@ -404,7 +417,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 
 
-	// 2.Reply false if log doesn't contained entry at prevLogIndex whose term
+	// 2. If args logindex not exists in follower, return conflictterm = -1
+	//  and conflictLen = log length
 	if args.PrevLogIndex > rf.getLastLogIndex() {
 		reply.Success = false
 		reply.ConflictTerm = -1
@@ -413,7 +427,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// 2.Reply false if log doesn't contained entry at prevLogIndex whose term
+	// 2. If follower's term != args term which index refers to, 
+	// return conflictterm = follower's log[index].term,
+	// conflictIndex = first conflictTerm's index in follower's log
 	if rf.getLogTerm(args.PrevLogIndex) != args.PrevLogTerm {
 		reply.Success = false
 		reply.ConflictTerm = rf.getLogTerm(args.PrevLogIndex)
@@ -422,13 +438,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// 3. 4. not a heatbeat msg
+	// 3. 4. if args Entries is not empty, it means it's not just a
+	// heartbeat msg without any imformation
 	if args.Entries != nil {
 		rf.log = rf.log[:args.PrevLogIndex + 1]
 		rf.log = append(rf.log, args.Entries...)
 	} 
 
-	// 5.
+	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index
+    // of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 	}
@@ -451,6 +469,7 @@ func (rf *Raft) MsgBroadCast(server int, args AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
 
 	ok := rf.sendAppendEntries(server, &args, &reply)
+	// resend appendEntries if fail to send msg in cycles
 	for !ok && rf.state != Leader {
 		if rf.killed() {
 			return
@@ -458,22 +477,35 @@ func (rf *Raft) MsgBroadCast(server int, args AppendEntriesArgs) {
 		ok = rf.sendAppendEntries(server, &args, &reply)
 	}
 
+	// if reply true and not a empty entries (not a heartbeat msg)
+	// update matchIndex and nextIndex, check commitIndex
 	if reply.Success == true && args.Entries != nil {
 		rf.matchIndex[server] += len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		rf.CheckCommit()
 	} else if reply.Success == false {
+		// if reply term is newer than leader's, it's means leader
+		// has some problems like network problems and so on
+		// election has been triggered
+		// this leader should become follower
 		if reply.Term > rf.currentTerm {
 			rf.BecomeFollower(reply.Term)
 			return
 		}
+		
+		// if confilct term = -1, it means followers don't have this term
+		// which index refers to
+		// so server should set nextindex to conflictLen
 		if reply.ConflictTerm == -1 {
 			rf.nextIndex[server] = reply.ConflictLen
 		} else {
+			// find the last term index
 			has, idx := rf.findTerm(reply.ConflictTerm)
 			if has {
+				// if exists, set nextindex to term index + 1
 				rf.nextIndex[server] = idx + 1
 			} else {
+				// if not, set conflictIndex
 				rf.nextIndex[server] = reply.ConflictIndex
 			}
 		}
@@ -600,30 +632,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) ticker() {
-	for rf.killed() == false {
-		rf.mu.Lock()
-
-		if rf.state == Leader {
-			rf.HeartbeatBroadcast()
-		} else if !rf.received {
-			rf.BecomeCandidate()
-			rf.mu.Unlock()
-			rf.MakeElection()
-			rf.mu.Lock()
-		}
-
-		rf.received = false
-		rf.mu.Unlock()
-
-		if rf.state == Leader {
-			time.Sleep(100 * time.Millisecond)
-		} else {
-			ms := 300 + rand.Intn(200)
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-		}
-	}
-}
+// use three ticker to broadcast, election and apply
 
 func (rf *Raft) broadcastTicker() {
 	for !rf.killed() {
