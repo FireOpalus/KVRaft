@@ -10,6 +10,7 @@ import (
 	//	"bytes"
 	"log"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -550,11 +551,12 @@ func (rf *Raft) HeartbeatBroadcast() {
 // If there exists an N such that N > commitIndex, a majority of 
 // matchIndex[i] >= N, and log[N].term == currentTerm: set commitIndex
 // = N
+
+
 // count all servers matchIndex, if a max index that over half servers 
 // have matched it, update commitIndex = N
 // use Max N Scan Algorithm (Raft Official Recommands)
-func (rf *Raft) CheckCommit() {
-	for idx := rf.getLastLogIndex(); idx > rf.commitIndex; idx--{
+/* for idx := rf.getLastLogIndex(); idx > rf.commitIndex; idx--{
 		if rf.log[idx].Term != rf.currentTerm {
 			continue
 		}
@@ -569,8 +571,21 @@ func (rf *Raft) CheckCommit() {
 				return
 			}
 		}
+	} */
+
+// get all matchIndex and sort them, the middle num is the popular num
+func (rf *Raft) CheckCommit() {
+	rf.matchIndex[rf.me] = rf.getLastLogIndex()
+
+	matchIndexCopy := make([]int, len(rf.matchIndex))
+	copy(matchIndexCopy, rf.matchIndex)
+	sort.Ints(matchIndexCopy)
+	
+	index := matchIndexCopy[len(matchIndexCopy)/2]
+
+	if index > rf.commitIndex && rf.getLogTerm(index) == rf.currentTerm {
+		rf.commitIndex = index
 	}
-	log.Printf("commitIndex now: %v\n", rf.commitIndex)
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
