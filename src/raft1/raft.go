@@ -86,6 +86,29 @@ func (rf *Raft) getLogTerm(index int) int {
 	return rf.log[index].Term
 }
 
+func (rf *Raft) findConflictIndex(conflictIndex int, conflictTerm int) int {
+	for idx := conflictIndex - 1; idx >= 1; idx-- {
+		if rf.log[idx].Term != conflictTerm {
+			break
+		}
+		conflictIndex = idx
+	}
+	return conflictIndex
+}
+
+// Find the last index with the term.
+func (rf *Raft) findTerm(term int) (bool, int) {
+	for i := len(rf.log) - 1; i >= 0; i-- {
+		t := rf.log[i].Term
+		if t == term {
+			return true, i
+		}
+		if t < term {
+			return false, -1
+		}
+	}
+	return false, -1
+}
 
 //
 // funcs for node to change state and initialize elements
@@ -121,6 +144,7 @@ func (rf *Raft) BecomeLeader() {
 		rf.matchIndex[idx] = 0
 	}
 
+	rf.matchIndex[rf.me] = rf.getLastLogIndex()
 	log.Printf("[Node %v] Becomes leader at term %v\n", rf.me, rf.currentTerm)
 	go rf.HeartbeatBroadcast()
 }
@@ -335,6 +359,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	ConflictTerm	int
+	ConflictIndex	int
+	ConflictLen 	int
 }
 
 // followers rewrite log entries by leader's appendentries RPC
@@ -361,7 +388,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//1.
+	//1.Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -374,9 +401,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.BecomeFollower(args.Term)
 	}
 
-	// 2.
-	if args.PrevLogIndex >= len(rf.log) || (len(rf.log) > 1 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+	reply.Term = rf.currentTerm
+
+
+	// 2.Reply false if log doesn't contained entry at prevLogIndex whose term
+	if args.PrevLogIndex > rf.getLastLogIndex() {
 		reply.Success = false
+		reply.ConflictTerm = -1
+		reply.ConflictLen = len(rf.log)
+		// log.Fatalf("2 %v %v %v", args.PrevLogIndex, len(rf.log), args.PrevLogTerm)
+		return
+	}
+
+	// 2.Reply false if log doesn't contained entry at prevLogIndex whose term
+	if rf.getLogTerm(args.PrevLogIndex) != args.PrevLogTerm {
+		reply.Success = false
+		reply.ConflictTerm = rf.getLogTerm(args.PrevLogIndex)
+		reply.ConflictIndex = rf.findConflictIndex(args.PrevLogIndex, reply.ConflictTerm)
 		// log.Fatalf("2 %v %v %v", args.PrevLogIndex, len(rf.log), args.PrevLogTerm)
 		return
 	}
@@ -406,21 +447,36 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // 		If successful: update nextIndex and matchIndex for follower
 //		If AppendEntries fails because of log inconsistency: decrement
 //		nextIndex and retry
-func (rf *Raft) MsgBroadCast(server int, args AppendEntriesArgs, isCommand bool) {
-	reply := AppendEntriesReply{
-		Term: -1,
+func (rf *Raft) MsgBroadCast(server int, args AppendEntriesArgs) {
+	reply := AppendEntriesReply{}
+
+	ok := rf.sendAppendEntries(server, &args, &reply)
+	for !ok && rf.state != Leader {
+		if rf.killed() {
+			return
+		}
+		ok = rf.sendAppendEntries(server, &args, &reply)
 	}
-	rf.sendAppendEntries(server, &args, &reply)
-	if !isCommand {
-		return
-	}
+
 	if reply.Success == true && args.Entries != nil {
-		rf.nextIndex[server] += len(args.Entries)
 		rf.matchIndex[server] += len(args.Entries)
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		rf.CheckCommit()
-	} else if reply.Success == false && args.Term > rf.currentTerm {
-		rf.nextIndex[server]--
-		// log.Fatalf("3")
+	} else if reply.Success == false {
+		if reply.Term > rf.currentTerm {
+			rf.BecomeFollower(reply.Term)
+			return
+		}
+		if reply.ConflictTerm == -1 {
+			rf.nextIndex[server] = reply.ConflictLen
+		} else {
+			has, idx := rf.findTerm(reply.ConflictTerm)
+			if has {
+				rf.nextIndex[server] = idx + 1
+			} else {
+				rf.nextIndex[server] = reply.ConflictIndex
+			}
+		}
 	}
 }
 
@@ -434,9 +490,6 @@ func (rf *Raft) HeartbeatBroadcast() {
 			return 
 		}
 		if idx == rf.me {
-			continue
-		}
-		if rf.getLastLogIndex() < rf.nextIndex[idx] - 1 {
 			continue
 		}
 		nextIndex := rf.nextIndex[idx]
@@ -458,7 +511,7 @@ func (rf *Raft) HeartbeatBroadcast() {
 			LeaderCommit: rf.commitIndex,
 		}
 
-		go rf.MsgBroadCast(idx, args, true)
+		go rf.MsgBroadCast(idx, args)
 	}
 }
 
@@ -470,7 +523,6 @@ func (rf *Raft) HeartbeatBroadcast() {
 // use Max N Scan Algorithm (Raft Official Recommands)
 func (rf *Raft) CheckCommit() {
 	for idx := rf.getLastLogIndex(); idx > rf.commitIndex; idx--{
-		log.Printf("max n: %v\n", idx)
 		if rf.log[idx].Term != rf.currentTerm {
 			continue
 		}
@@ -480,6 +532,7 @@ func (rf *Raft) CheckCommit() {
 				count++
 			}
 			if count * 2 > len(rf.peers) {
+				log.Printf("max n: %v\n", idx)
 				rf.commitIndex = idx
 				return
 			}
@@ -579,7 +632,7 @@ func (rf *Raft) broadcastTicker() {
 			rf.HeartbeatBroadcast()
 		}
 		rf.mu.Unlock()
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -607,7 +660,7 @@ func (rf *Raft) applyTicker() {
 
 		rf.mu.Lock()
 		for rf.lastApplied < rf.commitIndex && rf.lastApplied < rf.getLastLogIndex() {
-			rf.lastApplied ++
+			rf.lastApplied += 1
 			msgs = append(msgs, raftapi.ApplyMsg{
 				CommandValid: true,
 				Command: rf.log[rf.lastApplied].Command,
