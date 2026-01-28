@@ -118,7 +118,7 @@ func (rf *Raft) BecomeLeader() {
 	for idx := range rf.peers {
 		rf.nextIndex[idx] = rf.getLastLogIndex() + 1
 		// log.Fatalf("[Node %v] Becomes leader, next index is %v\n", rf.me, rf.nextIndex[idx])
-		rf.matchIndex[idx] = -1
+		rf.matchIndex[idx] = 0
 	}
 
 	log.Printf("[Node %v] Becomes leader at term %v\n", rf.me, rf.currentTerm)
@@ -375,15 +375,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 2.
-	if args.PrevLogIndex >= len(rf.log) || (len(rf.log) > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+	if args.PrevLogIndex >= len(rf.log) || (len(rf.log) > 1 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		reply.Success = false
 		// log.Fatalf("2 %v %v %v", args.PrevLogIndex, len(rf.log), args.PrevLogTerm)
 		return
 	}
 
 	// 3. 4. not a heatbeat msg
-	if len(args.Entries) > 0 {
-		rf.rewriteLogEntries(args)
+	if args.Entries != nil {
+		rf.log = rf.log[:args.PrevLogIndex + 1]
+		rf.log = append(rf.log, args.Entries...)
 	} 
 
 	// 5.
@@ -644,12 +645,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (3A, 3B, 3C).
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = make([]LogEntry, 0)
+	rf.log = make([]LogEntry, 1)
 	rf.state = Follower
 	rf.votersNum = 0
 	rf.received = true
-	rf.commitIndex = -1
-	rf.lastApplied = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))	
 
