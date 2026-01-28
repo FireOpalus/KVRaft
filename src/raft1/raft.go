@@ -374,23 +374,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.BecomeFollower(args.Term)
 	}
 
-	if args.Entries != nil {
-		// 2.
-		if args.PrevLogIndex >= len(rf.log) || (len(rf.log) > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
-			reply.Success = false
-			log.Fatalf("2 %v %v %v", args.PrevLogIndex, len(rf.log), args.PrevLogTerm)
-			return
-		}
+	// 2.
+	if args.PrevLogIndex >= len(rf.log) || (len(rf.log) > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		reply.Success = false
+		// log.Fatalf("2 %v %v %v", args.PrevLogIndex, len(rf.log), args.PrevLogTerm)
+		return
+	}
 
-		// 3. 4. not a heatbeat msg
-		if len(args.Entries) > 0 {
-			rf.rewriteLogEntries(args)
-		} 
+	// 3. 4. not a heatbeat msg
+	if len(args.Entries) > 0 {
+		rf.rewriteLogEntries(args)
+	} 
 
-		// 5.
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
-		}
+	// 5.
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 	}
 	
 	reply.Term = rf.currentTerm
@@ -421,7 +419,7 @@ func (rf *Raft) MsgBroadCast(server int, args AppendEntriesArgs, isCommand bool)
 		rf.CheckCommit()
 	} else if reply.Success == false && args.Term > rf.currentTerm {
 		rf.nextIndex[server]--
-		log.Fatalf("3")
+		// log.Fatalf("3")
 	}
 }
 
