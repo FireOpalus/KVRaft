@@ -61,6 +61,7 @@ type Raft struct {
 	votedFor int
 	state ServerState
 	log []LogEntry
+	votersNum int
 	received bool
 
 	// volatile state
@@ -136,6 +137,7 @@ func (rf *Raft) BecomeFollower(term int) {
 	if term > rf.currentTerm {
 		rf.currentTerm = term
 		rf.votedFor = -1
+		rf.votersNum = 0
 	}
 	rf.persist()
 	rf.received = true
@@ -147,6 +149,7 @@ func (rf *Raft) BecomeCandidate() {
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.votersNum = 1
 	rf.persist()
 
 	// log.Printf("[Node %v] Becomes candidate at term %v\n", rf.me, rf.currentTerm)
@@ -290,39 +293,30 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
-
-	reply.Term = rf.currentTerm
-
 	if args.Term > rf.currentTerm {
 		rf.BecomeFollower(args.Term)
-	} else if args.Term == rf.currentTerm && rf.state == Candidate {
-		rf.BecomeFollower(args.Term)
 	}
-	upToDate := (args.LastLogTerm > rf.getLastLogTerm()) ||
-		(args.LastLogTerm == rf.getLastLogTerm() && args.LastLogIndex >= rf.getLastLogIndex())
-
-	// log.Printf("[Node %v] received vote req from %v at term %v ", rf.me, args.CandidateID, args.CurrentTerm)
-	// log.Printf("rf.votedFor = %v, upToDate = %v\n", rf.votedFor, upToDate)
-
-	if upToDate {
-		rf.received = true
-		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-			// Vote for this candidate, and reset rf.received.
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		LastLogIndex := rf.getLastLogIndex()
+		LastLogTerm := rf.getLastLogTerm()
+		if LastLogTerm < args.LastLogTerm || (LastLogTerm == args.LastLogTerm && LastLogIndex <= args.LastLogIndex) {
 			rf.votedFor = args.CandidateId
+			rf.received = true
 			reply.VoteGranted = true
-			rf.persist()
-			return
+			log.Printf("[Node %v] Votes for %v at term %v\n", rf.me, args.CandidateId, args.Term)
+		} else {
+			reply.VoteGranted = false
+			log.Printf("[Node %v] refuse to vote for %v at term %v\n", rf.me, args.CandidateId, args.Term)
 		}
+	} else {
+		reply.VoteGranted = false
 	}
-	// Refuse to vote.
-	reply.VoteGranted = false
-	
+	reply.Term = rf.currentTerm
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -352,51 +346,48 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, count *int32) {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	if ok {
-		rf.mu.Lock()
-
-		if reply.VoteGranted {
-			atomic.AddInt32(count, 1)
-			// log.Printf("[Node %v] received vote from %v at term %v, count = %v\n", rf.me, server, args.CurrentTerm, atomic.LoadInt32(count))
-			if rf.state == Candidate && atomic.LoadInt32(count) > int32(len(rf.peers)/2) {
-				rf.mu.Unlock()
-				rf.BecomeLeader()
-				rf.mu.Lock()
-			}
-		} else if reply.Term > rf.currentTerm {
-			rf.BecomeFollower(reply.Term)
-		}
-
-		rf.mu.Unlock()
-	} else {
-		// log.Printf("[Node %v] failed to send request vote to %v\n", rf.me, server)
-	}
+	return ok
 }
-
 // Candidates make election
 // Should term increase 1 and initialize lastlogindex & lastlogterm for compare in requestvote func
 // Also initilize votedFor and votersNum to get tickets and count to judge if can be leader node
 func (rf *Raft) MakeElection() {
-	arg := RequestVoteArgs{
-		CandidateId:  rf.me,
-		Term:  rf.currentTerm,
-		LastLogIndex: rf.getLastLogIndex(),
-		LastLogTerm:  rf.getLastLogTerm(),
-	}
+	rf.mu.Lock()
+	term := rf.currentTerm
+	candidateid := rf.me
+	lastlogindex := rf.getLastLogIndex()
+	lastlogterm := rf.getLastLogTerm()
+	rf.votedFor = rf.me
+	rf.votersNum = 1
+	rf.mu.Unlock()
 
-	var count int32 = 1
-
-	for i := 0; i < len(rf.peers); i++ {
-		if rf.state != Candidate {
-			break
-		}
-		if i == rf.me {
+	for idx := range rf.peers {
+		if idx == rf.me {
 			continue
 		}
-		var reply RequestVoteReply
-		go rf.sendRequestVote(i, &arg, &reply, &count)
+		go func(server int) {
+			args := RequestVoteArgs{
+			Term: term,
+			CandidateId: candidateid,
+			LastLogIndex: lastlogindex,
+			LastLogTerm: lastlogterm,
+			}
+			reply := RequestVoteReply{}
+			rf.sendRequestVote(server, &args, &reply)
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if reply.VoteGranted == true {
+				rf.votersNum++
+			} else if reply.Term > rf.currentTerm {
+				rf.BecomeFollower(reply.Term)
+				return
+			}
+			if rf.state == Candidate && rf.votersNum * 2 > len(rf.peers) {
+				rf.BecomeLeader()
+			}
+		}(idx)
 	}
 }
 
@@ -689,7 +680,9 @@ func (rf *Raft) electionTicker() {
 		rf.mu.Lock()
 		if rf.state != Leader && rf.received == false {
 			rf.BecomeCandidate()
+			rf.mu.Unlock()
 			rf.MakeElection()
+			rf.mu.Lock()
 		}
 
 		rf.received = false
@@ -749,6 +742,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.received = true
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.votersNum = 0
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))	
 
