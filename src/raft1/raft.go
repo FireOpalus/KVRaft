@@ -149,7 +149,6 @@ func (rf *Raft) BecomeFollower(term int) {
 	if term > rf.currentTerm {
 		rf.currentTerm = term
 		rf.votedFor = -1
-		rf.votersNum = 0
 	}
 	rf.persist()
 	rf.received = true
@@ -161,7 +160,6 @@ func (rf *Raft) BecomeCandidate() {
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	rf.votersNum = 1
 	rf.persist()
 
 	// log.Printf("[Node %v] Becomes candidate at term %v\n", rf.me, rf.currentTerm)
@@ -363,8 +361,9 @@ func (rf *Raft) MakeElection() {
 	lastlogindex := rf.getLastLogIndex()
 	lastlogterm := rf.getLastLogTerm()
 	rf.votedFor = rf.me
-	rf.votersNum = 1
 	rf.mu.Unlock()
+
+	count := 1
 
 	for idx := range rf.peers {
 		if idx == rf.me {
@@ -382,12 +381,12 @@ func (rf *Raft) MakeElection() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			if reply.VoteGranted == true {
-				rf.votersNum++
+				count++
 			} else if reply.Term > rf.currentTerm {
 				rf.BecomeFollower(reply.Term)
 				return
 			}
-			if rf.state == Candidate && rf.votersNum * 2 > len(rf.peers) {
+			if rf.state == Candidate && count * 2 > len(rf.peers) {
 				rf.BecomeLeader()
 			}
 		}(idx)
@@ -437,7 +436,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.received = true
 
-	if args.Term >= rf.currentTerm && rf.state != Follower {
+	if args.Term > rf.currentTerm {
+		rf.BecomeFollower(args.Term)
+	} else if args.Term == rf.currentTerm && rf.state != Follower {
 		rf.BecomeFollower(args.Term)
 	}
 
@@ -528,7 +529,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.received = true
 
-	if args.Term > rf.currentTerm && rf.state != Follower {
+	if args.Term > rf.currentTerm {
+		rf.BecomeFollower(args.Term)
+	} else if args.Term == rf.currentTerm && rf.state != Follower {
 		rf.BecomeFollower(args.Term)
 	}
 
@@ -899,7 +902,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.state = Follower
 		rf.received = true
 
-		rf.votersNum = 0
 		rf.nextIndex = make([]int, len(peers))
 		rf.matchIndex = make([]int, len(peers))	
 
