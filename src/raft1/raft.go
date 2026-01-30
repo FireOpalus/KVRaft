@@ -800,6 +800,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// for (3C)
 	rf.persist()
 
+	rf.HeartbeatBroadcast()
+
 	return index, term, isLeader
 }
 
