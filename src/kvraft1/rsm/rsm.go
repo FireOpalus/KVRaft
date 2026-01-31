@@ -49,7 +49,7 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
-	resChs		 map[int]chan any
+	resChs		 map[int64]chan any
 }
 
 // servers[] contains the ports of the set of
@@ -73,7 +73,7 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
-		resChs:		  make(map[int]chan any),
+		resChs:		  make(map[int64]chan any),
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
@@ -109,14 +109,14 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	}
 
 	// call rf.Start() for client op, return to service
-	index, _, isLeader := rsm.rf.Start(op)
+	_, _, isLeader := rsm.rf.Start(op)
 	if isLeader == false {
 		return rpc.ErrWrongLeader, nil // i'm dead, try another server.
 	}
 	
 	rsm.mu.Lock()
 	ch := make(chan any, 1)
-	rsm.resChs[index] = ch
+	rsm.resChs[op.Id] = ch
 	rsm.mu.Unlock()
 
 	select {
@@ -127,7 +127,7 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		return rpc.OK, result
 	case <- time.After(2 * time.Second):
 		rsm.mu.Lock()
-		delete(rsm.resChs, index)
+		delete(rsm.resChs, op.Id)
 		rsm.mu.Unlock()
 		return rpc.ErrWrongLeader, nil
 	}
@@ -136,27 +136,24 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 // goroutine to read committed operations from applyCh,
 // and apply them to the state machine.
 func (rsm *RSM) reader()  {
+	// loop will exit when applyCh or Raft is closed, means server closed
 	for msg := range rsm.applyCh {
 		rsm.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
 			result := rsm.sm.DoOp(op.Req)
 
-			if ch, ok := rsm.resChs[msg.CommandIndex]; ok {
-				if op.Me == rsm.me {
-					ch <- result
-				} else {
-					ch <- nil
-				}
+			if ch, ok := rsm.resChs[op.Id]; ok {
+				ch <- result
+				delete(rsm.resChs, op.Id)
 			}
-			delete(rsm.resChs, msg.CommandIndex)
 		} else if msg.SnapshotValid {
 			rsm.sm.Restore(msg.Snapshot)
 		}
 		rsm.mu.Unlock()
 	}
 
-	// delete all resChs and close reader
+	// garbage collect: delete all resChs and close reader
 	for idx, ch := range rsm.resChs {
 		ch <- nil
 		delete(rsm.resChs, idx)
