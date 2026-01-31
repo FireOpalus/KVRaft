@@ -9,6 +9,7 @@ import (
 	"6.5840/raftapi"
 	"6.5840/tester1"
 
+	"time"
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
@@ -18,8 +19,15 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Me			int
+	Id			int64
+	Req			any
 }
 
+/* type ResCh struct {
+	Id			int64
+	Channel		chan any
+} */
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -41,6 +49,7 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
+	resChs		 map[int64]chan any
 }
 
 // servers[] contains the ports of the set of
@@ -64,10 +73,19 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		resChs:		  make(map[int64]chan any),
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+
+	snapshot := persister.ReadSnapshot()
+	if len(snapshot) > 0 {
+		rsm.sm.Restore(snapshot)
+	}
+
+	go rsm.reader()
+
 	return rsm
 }
 
@@ -75,6 +93,11 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
+// generate id from time stamp and server id
+func (rsm *RSM) GenerateId(serverId int) int64 {
+	timestamp := time.Now().UnixNano()
+	return int64(serverId)*1e18 + timestamp
+}
 
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
@@ -84,7 +107,70 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// Submit creates an Op structure to run a command through Raft;
 	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
 	// is the argument to Submit and id is a unique id for the op.
+	op := Op{
+		Me: 	rsm.me,
+		Id: 	rsm.GenerateId(rsm.me),
+		Req:	req,
+	}
 
-	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	// call rf.Start() for client op, return to service
+	_, _, isLeader := rsm.rf.Start(op)
+	if isLeader == false {
+		return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	}
+	
+	rsm.mu.Lock()
+	ch := make(chan any, 1)
+	rsm.resChs[op.Id] = ch
+	rsm.mu.Unlock()
+
+	select {
+	case result := <-ch:
+		if result == nil {
+			return rpc.ErrWrongLeader, nil
+		}
+		return rpc.OK, result
+	case <- time.After(2 * time.Second):
+		rsm.mu.Lock()
+		delete(rsm.resChs, op.Id)
+		rsm.mu.Unlock()
+		return rpc.ErrWrongLeader, nil
+	}
+}
+
+// goroutine to read committed operations from applyCh,
+// and apply them to the state machine.
+func (rsm *RSM) reader()  {
+	// loop will exit when applyCh or Raft is closed, means server closed
+	for msg := range rsm.applyCh {
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+			result := rsm.sm.DoOp(op.Req)
+
+			// 更细粒度持有锁，缩短单次 rsm 锁的持有时间
+			// Fine-grained lock holding shortens
+			// the holding time of a single rsm lock.
+			rsm.mu.Lock()
+			if ch, ok := rsm.resChs[op.Id]; ok {
+				ch <- result
+				delete(rsm.resChs, op.Id)
+			}
+			rsm.mu.Unlock()
+		} else if msg.SnapshotValid {
+			rsm.mu.Lock()
+			rsm.sm.Restore(msg.Snapshot)
+			rsm.mu.Unlock()
+		}
+
+		if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() > rsm.maxraftstate {
+			snapshot := rsm.sm.Snapshot()
+			rsm.rf.Snapshot(msg.CommandIndex, snapshot)
+		}
+	}
+
+	// garbage collect: delete all resChs and close reader
+	for idx, ch := range rsm.resChs {
+		ch <- nil
+		delete(rsm.resChs, idx)
+	}
 }
