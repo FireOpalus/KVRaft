@@ -1,2 +1,6 @@
 pkg/
 *-handin.tar.gz
+.vscode/settings.json
+src/main/test-mr-many.sh
+src/main/test-mr.sh
+.gitignore
