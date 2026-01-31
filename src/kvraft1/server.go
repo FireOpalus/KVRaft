@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,9 @@ type KVServer struct {
 
 	kvmap map[string]KVData
 }
+
+//
+
 
 // Req struct
 
@@ -90,12 +94,43 @@ func (kv *KVServer) DoOp(req any) any {
 }
 
 func (kv *KVServer) Snapshot() []byte {
-	// Your code here
-	return nil
+	kv.mu.Lock()
+	tmp := make(map[string]KVData, len(kv.kvmap))
+	for k, v := range kv.kvmap {
+		tmp[k] = v
+	}
+	kv.mu.Unlock()
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	err := e.Encode(tmp)
+	if err != nil {
+		log.Printf("KVServer %v data encode error: %v\n", kv.me, err)
+		return nil
+	}
+
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	if len(data) == 0 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var tmp map[string]KVData
+	if d.Decode(&tmp) != nil {
+		log.Printf("Fail to decode.\n")
+	} else {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		kv.kvmap = make(map[string]KVData, len(tmp))
+		for k, v := range tmp {
+			kv.kvmap[k] = v
+		}
+	}
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
