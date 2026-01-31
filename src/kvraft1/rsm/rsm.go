@@ -138,19 +138,24 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 func (rsm *RSM) reader()  {
 	// loop will exit when applyCh or Raft is closed, means server closed
 	for msg := range rsm.applyCh {
-		rsm.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
 			result := rsm.sm.DoOp(op.Req)
 
+			// 更细粒度持有锁，缩短单次 rsm 锁的持有时间
+			// Fine-grained lock holding shortens
+			// the holding time of a single rsm lock.
+			rsm.mu.Lock()
 			if ch, ok := rsm.resChs[op.Id]; ok {
 				ch <- result
 				delete(rsm.resChs, op.Id)
 			}
+			rsm.mu.Unlock()
 		} else if msg.SnapshotValid {
+			rsm.mu.Lock()
 			rsm.sm.Restore(msg.Snapshot)
+			rsm.mu.Unlock()
 		}
-		rsm.mu.Unlock()
 	}
 
 	// garbage collect: delete all resChs and close reader
