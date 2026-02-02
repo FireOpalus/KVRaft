@@ -2,6 +2,7 @@ package shardgrp
 
 import (
 	"time"
+	// "log"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/shardkv1/shardcfg"
@@ -31,6 +32,9 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 		if !ok || reply.Err == rpc.ErrWrongLeader {
 			// if wrong leader error happened, turn to next server
 			idx = (idx + 1) % len(ck.servers)
+		} else if reply.Err == rpc.ErrWrongGroup {
+			ck.leaderId = idx
+			return reply.Value, reply.Version, reply.Err
 		} else {
 			ck.leaderId = idx
 			return reply.Value, reply.Version, reply.Err
@@ -58,9 +62,13 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		ok := ck.clnt.Call(ck.servers[idx], "KVServer.Put", &args, &reply)
 
 		if ok {
+			
 			if reply.Err == rpc.ErrWrongLeader {
 				idx = (idx + 1) % len(ck.servers)
 				// continue to allow other errors to be handled or to sleep if cycled
+			} else if reply.Err == rpc.ErrWrongGroup {
+				ck.leaderId = idx
+				return reply.Err
 			} else if reply.Err == rpc.ErrVersion && !firstCall {
 				ck.leaderId = idx
 				return rpc.ErrMaybe
@@ -68,6 +76,7 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 				ck.leaderId = idx
             	return reply.Err
 			}
+			// log.Printf("%v", reply.Err)
 		} else {
 			// update idx on RPC failure
 			idx = (idx + 1) % len(ck.servers)
@@ -128,7 +137,12 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 
 		if !ok || reply.Err == rpc.ErrWrongLeader {
 			idx = (idx + 1) % len(ck.servers)
+		} else if reply.Err == rpc.ErrWrongGroup {
+			ck.leaderId = idx
+			// log.Printf("1:%v", reply.Err)
+			return reply.Err
 		} else {
+			// log.Printf("2:%v", reply.Err)
 			return reply.Err
 		}
 
@@ -148,7 +162,10 @@ func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 		reply := shardrpc.DeleteShardReply{}
 
 		ok := ck.clnt.Call(ck.servers[idx], "KVServer.DeleteShard", &args, &reply)
-
+if reply.Err == rpc.ErrWrongGroup {
+			ck.leaderId = idx
+			return reply.Err
+		} else 
 		if !ok || reply.Err == rpc.ErrWrongLeader {
 			idx = (idx + 1) % len(ck.servers)
 		} else {

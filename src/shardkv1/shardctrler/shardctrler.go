@@ -7,15 +7,18 @@ package shardctrler
 import (
 	"log"
 	"sync"
+
 	// "time"
 
 	"6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
+	"6.5840/shardkv1/shardgrp"
 	"6.5840/tester1"
 )
 
+var shardConfigName string = "shardconfig"
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -53,7 +56,7 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	sck.mu.Lock()
 	defer sck.mu.Unlock()
 
-	err := sck.IKVClerk.Put("shardConfig", cfg.String(), 0)
+	err := sck.IKVClerk.Put(shardConfigName, cfg.String(), 0)
 	if err != rpc.OK {
 		log.Fatalf("ShardCtrler: fail to init config.")
 	}
@@ -64,7 +67,68 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // changes the configuration it may be superseded by another
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
-	// Your code here.
+	sck.mu.Lock()
+	defer sck.mu.Unlock()
+
+	// get cfg
+	str, version, err := sck.IKVClerk.Get(shardConfigName)
+	if err != rpc.OK {
+		log.Fatalf("ShardCtrler: fail to read config.")
+	}
+	cfg := shardcfg.FromString(str)
+	
+	// check num
+	if new.Num <= cfg.Num {
+		log.Printf("new config's num is less than cfg\n")
+		return
+	}
+
+	// check all shards
+	for i := range len(new.Shards) {
+		srcGid := cfg.Shards[i]
+		dstGid := new.Shards[i]
+
+		// if valid srcGid
+		if srcGid != dstGid {
+			var state []byte
+			var srcServers, dstServers []string
+			var srcCk, dstCk *shardgrp.Clerk
+			var err rpc.Err
+			
+			if srcGid != 0 {
+				srcServers = cfg.Groups[srcGid]
+				srcCk = shardgrp.MakeClerk(sck.clnt, srcServers)
+
+				state, err = srcCk.FreezeShard(shardcfg.Tshid(i), cfg.Num)
+				if err != rpc.OK {
+					log.Printf("ShardCtrler: fail to freeze shard %v in group %v.\n", i, srcGid)
+				}
+			}
+
+			if dstGid != 0 {
+				dstServers = new.Groups[dstGid]
+				dstCk = shardgrp.MakeClerk(sck.clnt, dstServers)
+
+				err = dstCk.InstallShard(shardcfg.Tshid(i), state, new.Num)
+				if err != rpc.OK {
+					log.Printf("ShardCtrler: fail to install shard %v in group %v.\n", i, dstGid)
+				}
+			}
+
+			if srcGid != 0 {
+				err = srcCk.DeleteShard(shardcfg.Tshid(i), cfg.Num)
+				if err != rpc.OK {
+					log.Printf("ShardCtrler: fail to install shard %v in group %v.\n", i, srcGid)
+				}
+			}
+		}
+	}
+
+	// update new config
+	err = sck.IKVClerk.Put(shardConfigName, new.String(), version)
+	if err != rpc.OK {
+		log.Printf("ShardCtrler: fail to update config., err: %v", err)
+	}
 }
 
 
@@ -74,7 +138,7 @@ func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 	sck.mu.Lock()
 	defer sck.mu.Unlock()
 
-	str, _, err :=sck.IKVClerk.Get("shardConfig")
+	str, _, err := sck.IKVClerk.Get(shardConfigName)
 	if err != rpc.OK {
 		log.Fatalf("ShardCtrler: fail to read config.")
 	}

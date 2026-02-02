@@ -2,17 +2,37 @@ package shardgrp
 
 import (
 	"bytes"
+	"log"
 	"sync"
 	"sync/atomic"
-	"log"
 
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
 	"6.5840/labrpc"
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp/shardrpc"
 	"6.5840/tester1"
 )
+
+type ShardState int
+
+const (
+	ShardStateUnknown ShardState = iota
+	ShardStateServing
+	ShardStateFrozen
+	ShardStateDeleted
+)
+
+type ClientPutResult struct {
+	id int64
+	req any
+}
+
+type ShardMeta struct {
+	state ShardState
+	num shardcfg.Tnum
+}
 
 // struct of KV use
 type KVData struct {
@@ -28,67 +48,187 @@ type KVServer struct {
 
 	mu sync.Mutex
 	
-	kvmap map[string]KVData
+	shardKvMap map[shardcfg.Tshid]map[string]KVData
+
+	clientPutResults map[int64]ClientPutResult
+
+	shardStates map[shardcfg.Tshid]ShardMeta
+}
+
+//
+func (kv *KVServer) DoGet(req rpc.GetArgs) any {
+	// check shard
+	shard := shardcfg.Key2Shard(req.Key)
+	if kv.shardStates[shard].state != ShardStateServing {
+		return rpc.GetReply{Err: rpc.ErrWrongGroup}
+	}
+
+	kvdata, ok := kv.shardKvMap[shard][req.Key]
+	var res rpc.GetReply
+	if ok {
+		res = rpc.GetReply{
+			Err: rpc.OK,
+			Value: kvdata.Value,
+			Version: kvdata.Version,
+		}
+	} else {
+		res = rpc.GetReply{
+			Err: rpc.ErrNoKey,
+		}
+	}
+	return res
+}
+
+func (kv *KVServer) DoPut(req rpc.PutArgs) any {
+	// check shard
+	shard := shardcfg.Key2Shard(req.Key)
+	if kv.shardStates[shard].state != ShardStateServing {
+		return rpc.PutReply{Err: rpc.ErrWrongGroup}
+	}
+
+	// 确保分片 map 已初始化
+	if kv.shardKvMap[shard] == nil {
+		kv.shardKvMap[shard] = make(map[string]KVData)
+	}
+
+	kvdata, ok := kv.shardKvMap[shard][req.Key]
+	var res rpc.PutReply
+	if !ok {
+		if req.Version == 0 {
+			kv.shardKvMap[shard][req.Key] = KVData{1, req.Value}
+			res.Err = rpc.OK
+		} else {
+			res.Err = rpc.ErrNoKey
+		}
+	} else {
+		if req.Version == kvdata.Version {
+			kvdata.Version++
+			kvdata.Value = req.Value
+			kv.shardKvMap[shard][req.Key] = kvdata
+			res.Err = rpc.OK
+		} else {
+			res.Err = rpc.ErrVersion
+		}
+	}
+	return res
+}
+
+func (kv *KVServer) DoFreezeShard(req shardrpc.FreezeShardArgs) any {
+	// check shard
+	s, ok := kv.shardStates[req.Shard]
+	if !ok || s.state != ShardStateServing {
+		return shardrpc.FreezeShardReply{Err: rpc.ErrWrongGroup}
+	}
+
+	s.state = ShardStateFrozen
+	kv.shardStates[req.Shard] = s
+	
+	stateMap := make(map[string]KVData)
+
+	// 直接复制该分片的数据
+	if shardData, ok := kv.shardKvMap[req.Shard]; ok {
+		for k, v := range shardData {
+			stateMap[k] = v
+		}
+	}
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if err := e.Encode(stateMap); err != nil {
+		log.Printf("KVServer DoFreezeShard encode error: %v", err)
+	}
+
+	return shardrpc.FreezeShardReply{
+		State: w.Bytes(),
+		Num:   req.Num,
+		Err:   rpc.OK,
+	}
+}
+
+func (kv *KVServer) DoInstallShard(req shardrpc.InstallShardArgs) any {
+	// check shard
+	s, ok := kv.shardStates[req.Shard]
+	if !ok || (s.state != ShardStateUnknown && s.state != ShardStateDeleted) {
+		return shardrpc.InstallShardReply{Err: rpc.ErrWrongGroup}
+	}
+	// remember to update shardstate
+	s.state = ShardStateServing
+	kv.shardStates[req.Shard] = s
+
+	if len(req.State) == 0 {
+		return shardrpc.InstallShardReply{Err: rpc.OK}
+	}
+	r := bytes.NewBuffer(req.State)
+	d := labgob.NewDecoder(r)
+	var tmp map[string]KVData
+	if d.Decode(&tmp) != nil {
+		log.Printf("Fail to decode.\n")
+	} else {
+		kv.shardKvMap[req.Shard] = make(map[string]KVData, len(tmp))
+		for k, v := range tmp {
+			kv.shardKvMap[req.Shard][k] = v
+		}
+	}
+
+	return shardrpc.InstallShardReply{Err: rpc.OK}
+}
+
+func (kv *KVServer) DoDeleteShard(req shardrpc.DeleteShardArgs) any {
+	// check shard
+	s, ok := kv.shardStates[req.Shard]
+	if !ok || s.state != ShardStateFrozen {
+		return shardrpc.DeleteShardReply{Err: rpc.ErrWrongGroup}
+	}
+
+	// 直接删除该分片的整个 map，如果 key 不存在也是安全的
+	delete(kv.shardKvMap, req.Shard)
+	
+	// 更新状态为 Deleted (可选，视具体状态机逻辑而定，或者直接从 shardStates 移除)
+	s.state = ShardStateDeleted
+	kv.shardStates[req.Shard] = s
+
+	return shardrpc.DeleteShardReply{Err: rpc.OK}
 }
 
 func (kv *KVServer) DoOp(req any) any {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	var res any
+
 	switch req := req.(type) {
 	case rpc.GetArgs:
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-		
-		kvdata, ok := kv.kvmap[req.Key]
-		var res rpc.GetReply
-		if ok {
-			res = rpc.GetReply{
-				Err: rpc.OK,
-				Value: kvdata.Value,
-				Version: kvdata.Version,
-			}
-		} else {
-			res = rpc.GetReply{
-				Err: rpc.ErrNoKey,
-			}
-		}
-		return res
+		res = kv.DoGet(req)
 
 	case rpc.PutArgs:
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
+		res = kv.DoPut(req)
 
-		kvdata, ok := kv.kvmap[req.Key]
-		var res rpc.PutReply
-		if !ok {
-			if req.Version == 0 {
-				kv.kvmap[req.Key] = KVData{1, req.Value}
-				res.Err = rpc.OK
-			} else {
-				res.Err = rpc.ErrNoKey
-			}
-		} else {
-			if req.Version == kvdata.Version {
-				kvdata.Version++
-				kvdata.Value = req.Value
-				kv.kvmap[req.Key] = kvdata
-				res.Err = rpc.OK
-			} else {
-				res.Err = rpc.ErrVersion
-			}
-		}
-		return res
+	case shardrpc.FreezeShardArgs:
+		res = kv.DoFreezeShard(req)
+
+	case shardrpc.InstallShardArgs:
+		res = kv.DoInstallShard(req)
+
+	case shardrpc.DeleteShardArgs:
+		res = kv.DoDeleteShard(req)
 
 	default:
 		log.Fatalf("Unknown req type!")
 	}
-	return nil
+	return res
 }
 
 
 func (kv *KVServer) Snapshot() []byte {
 	kv.mu.Lock()
-	tmp := make(map[string]KVData, len(kv.kvmap))
-	for k, v := range kv.kvmap {
-		tmp[k] = v
+	// Deep copy
+	tmp := make(map[shardcfg.Tshid]map[string]KVData)
+	for s, m := range kv.shardKvMap {
+		shardCopy := make(map[string]KVData, len(m))
+		for k, v := range m {
+			shardCopy[k] = v
+		}
+		tmp[s] = shardCopy
 	}
 	kv.mu.Unlock()
 
@@ -110,16 +250,13 @@ func (kv *KVServer) Restore(data []byte) {
 	}
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	var tmp map[string]KVData
+	var tmp map[shardcfg.Tshid]map[string]KVData
 	if d.Decode(&tmp) != nil {
 		log.Printf("Fail to decode.\n")
 	} else {
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
-		kv.kvmap = make(map[string]KVData, len(tmp))
-		for k, v := range tmp {
-			kv.kvmap[k] = v
-		}
+		kv.shardKvMap = tmp
 	}
 }
 
@@ -235,9 +372,27 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 
 	kv := &KVServer{gid: gid, me: me}
 
-	kv.kvmap = make(map[string]KVData)
-
+	// initialize parameters (fix loop)
+	kv.shardKvMap = make(map[shardcfg.Tshid]map[string]KVData)
+	kv.shardStates = make(map[shardcfg.Tshid]ShardMeta)
+	kv.clientPutResults = make(map[int64]ClientPutResult)
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
+
+	// gid1 initialize all shards
+	if kv.gid == shardcfg.Gid1 {
+		for i := range shardcfg.NShards {
+			kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{state: ShardStateServing, num: 0}
+			kv.shardKvMap[shardcfg.Tshid(i)] = make(map[string]KVData)
+		}
+	} else {
+		// For other groups, initialize shards as Unknown state
+		// They will be set to Serving when they receive the configuration
+		for i := range shardcfg.NShards {
+			kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{state: ShardStateUnknown, num: 0}
+			kv.shardKvMap[shardcfg.Tshid(i)] = make(map[string]KVData)
+		}
+	}
+
 
 	return []tester.IService{kv, kv.rsm.Raft()}
 }
