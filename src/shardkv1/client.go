@@ -10,6 +10,7 @@ package shardkv
 
 import (
 	"log"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
@@ -23,6 +24,8 @@ type Clerk struct {
 	clnt *tester.Clnt
 	sck  *shardctrler.ShardCtrler
 	// You will have to modify this struct.
+	grpClerks map[tester.Tgid]*shardgrp.Clerk
+	cfg	*shardcfg.ShardConfig
 }
 
 // The tester calls MakeClerk and passes in a shardctrler so that
@@ -31,8 +34,19 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 	ck := &Clerk{
 		clnt: clnt,
 		sck:  sck,
+		grpClerks: make(map[tester.Tgid]*shardgrp.Clerk),
 	}
 	// You'll have to add code here.
+	cfg := sck.Query()
+	ck.cfg = cfg
+	for gid, servers := range cfg.Groups {
+		if len(servers) == 0 {
+			ck.grpClerks[gid] = nil
+		} else {
+			ck.grpClerks[gid] = shardgrp.MakeClerk(clnt, servers)
+		}
+	}
+
 	return ck
 }
 
@@ -50,9 +64,15 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 		log.Fatalf("Client: Get shard servers error.")
 	}
 
-	grpClerk := shardgrp.MakeClerk(ck.clnt, servers)
-	value, version, err := grpClerk.Get(key)
-	return value, version, err
+	for {
+		grpClerk := shardgrp.MakeClerk(ck.clnt, servers)
+		value, version, err := grpClerk.Get(key)
+		if err == rpc.ErrWrongGroup {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		return value, version, err
+	}
 }
 
 // Put a key to a shard group.
@@ -64,7 +84,14 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		log.Fatalf("Client: Get shard servers error.")
 	}
 
-	grpClerk := shardgrp.MakeClerk(ck.clnt, servers)
-	err := grpClerk.Put(key, value, version)
-	return err
+	for {
+		grpClerk := shardgrp.MakeClerk(ck.clnt, servers)
+		err := grpClerk.Put(key, value, version)
+		if err == rpc.ErrWrongGroup {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		return err
+	}
+	
 }

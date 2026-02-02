@@ -116,11 +116,12 @@ func (kv *KVServer) DoPut(req rpc.PutArgs) any {
 func (kv *KVServer) DoFreezeShard(req shardrpc.FreezeShardArgs) any {
 	// check shard
 	s, ok := kv.shardStates[req.Shard]
-	if !ok || s.state != ShardStateServing {
+	if !ok || (s.state != ShardStateServing && s.num < req.Num) {
 		return shardrpc.FreezeShardReply{Err: rpc.ErrWrongGroup}
 	}
 
 	s.state = ShardStateFrozen
+	s.num = req.Num
 	kv.shardStates[req.Shard] = s
 	
 	stateMap := make(map[string]KVData)
@@ -148,11 +149,12 @@ func (kv *KVServer) DoFreezeShard(req shardrpc.FreezeShardArgs) any {
 func (kv *KVServer) DoInstallShard(req shardrpc.InstallShardArgs) any {
 	// check shard
 	s, ok := kv.shardStates[req.Shard]
-	if !ok || (s.state != ShardStateUnknown && s.state != ShardStateDeleted) {
+	if !ok || (s.state != ShardStateUnknown && s.state != ShardStateDeleted && s.num < req.Num) {
 		return shardrpc.InstallShardReply{Err: rpc.ErrWrongGroup}
 	}
 	// remember to update shardstate
 	s.state = ShardStateServing
+	s.num = req.Num
 	kv.shardStates[req.Shard] = s
 
 	if len(req.State) == 0 {
@@ -176,7 +178,7 @@ func (kv *KVServer) DoInstallShard(req shardrpc.InstallShardArgs) any {
 func (kv *KVServer) DoDeleteShard(req shardrpc.DeleteShardArgs) any {
 	// check shard
 	s, ok := kv.shardStates[req.Shard]
-	if !ok || s.state != ShardStateFrozen {
+	if !ok || (s.state != ShardStateFrozen && s.num < req.Num) {
 		return shardrpc.DeleteShardReply{Err: rpc.ErrWrongGroup}
 	}
 
@@ -185,6 +187,7 @@ func (kv *KVServer) DoDeleteShard(req shardrpc.DeleteShardArgs) any {
 	
 	// 更新状态为 Deleted (可选，视具体状态机逻辑而定，或者直接从 shardStates 移除)
 	s.state = ShardStateDeleted
+	s.num = req.Num
 	kv.shardStates[req.Shard] = s
 
 	return shardrpc.DeleteShardReply{Err: rpc.OK}

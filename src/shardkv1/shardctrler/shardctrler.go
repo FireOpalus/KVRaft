@@ -57,8 +57,9 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	defer sck.mu.Unlock()
 
 	err := sck.IKVClerk.Put(shardConfigName, cfg.String(), 0)
-	if err != rpc.OK {
-		log.Fatalf("ShardCtrler: fail to init config.")
+	for err != rpc.OK {
+		log.Printf("ShardCtrler: fail to init config.")
+		err = sck.IKVClerk.Put(shardConfigName, cfg.String(), 0)
 	}
 }
 
@@ -73,7 +74,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	// get cfg
 	str, version, err := sck.IKVClerk.Get(shardConfigName)
 	if err != rpc.OK {
-		log.Fatalf("ShardCtrler: fail to read config.")
+		log.Printf("ShardCtrler: fail to read config.")
 	}
 	cfg := shardcfg.FromString(str)
 	
@@ -101,7 +102,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 
 				state, err = srcCk.FreezeShard(shardcfg.Tshid(i), cfg.Num)
 				if err != rpc.OK {
-					log.Printf("ShardCtrler: fail to freeze shard %v in group %v.\n", i, srcGid)
+					log.Printf("ShardCtrler: fail to freeze shard %v in group %v. Error: %v\n", i, srcGid, err)
 				}
 			}
 
@@ -111,14 +112,14 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 
 				err = dstCk.InstallShard(shardcfg.Tshid(i), state, new.Num)
 				if err != rpc.OK {
-					log.Printf("ShardCtrler: fail to install shard %v in group %v.\n", i, dstGid)
+					log.Printf("ShardCtrler: fail to install shard %v in group %v. Error: %v\n", i, dstGid, err)
 				}
 			}
 
 			if srcGid != 0 {
 				err = srcCk.DeleteShard(shardcfg.Tshid(i), cfg.Num)
 				if err != rpc.OK {
-					log.Printf("ShardCtrler: fail to install shard %v in group %v.\n", i, srcGid)
+					log.Printf("ShardCtrler: fail to install shard %v in group %v. Error: %v\n", i, srcGid, err)
 				}
 			}
 		}
