@@ -30,8 +30,8 @@ type ClientPutResult struct {
 }
 
 type ShardMeta struct {
-	state ShardState
-	num shardcfg.Tnum
+	State ShardState
+	Num   shardcfg.Tnum
 }
 
 // struct of KV use
@@ -59,7 +59,7 @@ type KVServer struct {
 func (kv *KVServer) DoGet(req rpc.GetArgs) any {
 	// check shard
 	shard := shardcfg.Key2Shard(req.Key)
-	if kv.shardStates[shard].state != ShardStateServing {
+	if kv.shardStates[shard].State != ShardStateServing {
 		return rpc.GetReply{Err: rpc.ErrWrongGroup}
 	}
 
@@ -82,7 +82,7 @@ func (kv *KVServer) DoGet(req rpc.GetArgs) any {
 func (kv *KVServer) DoPut(req rpc.PutArgs) any {
 	// check shard
 	shard := shardcfg.Key2Shard(req.Key)
-	if kv.shardStates[shard].state != ShardStateServing {
+	if kv.shardStates[shard].State != ShardStateServing {
 		return rpc.PutReply{Err: rpc.ErrWrongGroup}
 	}
 
@@ -116,12 +116,14 @@ func (kv *KVServer) DoPut(req rpc.PutArgs) any {
 func (kv *KVServer) DoFreezeShard(req shardrpc.FreezeShardArgs) any {
 	// check shard
 	s, ok := kv.shardStates[req.Shard]
-	if !ok || (s.state != ShardStateServing && s.num < req.Num) {
+	if !ok || s.Num > req.Num || 
+       (s.State != ShardStateServing && s.State != ShardStateFrozen) ||
+       (s.State == ShardStateFrozen && s.Num != req.Num) {
 		return shardrpc.FreezeShardReply{Err: rpc.ErrWrongGroup}
 	}
 
-	s.state = ShardStateFrozen
-	s.num = req.Num
+	s.State = ShardStateFrozen
+	s.Num = req.Num
 	kv.shardStates[req.Shard] = s
 	
 	stateMap := make(map[string]KVData)
@@ -149,12 +151,12 @@ func (kv *KVServer) DoFreezeShard(req shardrpc.FreezeShardArgs) any {
 func (kv *KVServer) DoInstallShard(req shardrpc.InstallShardArgs) any {
 	// check shard
 	s, ok := kv.shardStates[req.Shard]
-	if !ok || (s.state != ShardStateUnknown && s.state != ShardStateDeleted && s.num < req.Num) {
+	if !ok || (s.State != ShardStateUnknown && s.State != ShardStateDeleted && s.Num < req.Num) {
 		return shardrpc.InstallShardReply{Err: rpc.ErrWrongGroup}
 	}
 	// remember to update shardstate
-	s.state = ShardStateServing
-	s.num = req.Num
+	s.State = ShardStateServing
+	s.Num = req.Num
 	kv.shardStates[req.Shard] = s
 
 	if len(req.State) == 0 {
@@ -178,7 +180,7 @@ func (kv *KVServer) DoInstallShard(req shardrpc.InstallShardArgs) any {
 func (kv *KVServer) DoDeleteShard(req shardrpc.DeleteShardArgs) any {
 	// check shard
 	s, ok := kv.shardStates[req.Shard]
-	if !ok || (s.state != ShardStateFrozen && s.num < req.Num) {
+	if !ok || (s.State != ShardStateFrozen && s.Num < req.Num) {
 		return shardrpc.DeleteShardReply{Err: rpc.ErrWrongGroup}
 	}
 
@@ -186,8 +188,8 @@ func (kv *KVServer) DoDeleteShard(req shardrpc.DeleteShardArgs) any {
 	delete(kv.shardKvMap, req.Shard)
 	
 	// 更新状态为 Deleted (可选，视具体状态机逻辑而定，或者直接从 shardStates 移除)
-	s.state = ShardStateDeleted
-	s.num = req.Num
+	s.State = ShardStateDeleted
+	s.Num = req.Num
 	kv.shardStates[req.Shard] = s
 
 	return shardrpc.DeleteShardReply{Err: rpc.OK}
@@ -233,6 +235,10 @@ func (kv *KVServer) Snapshot() []byte {
 		}
 		tmp[s] = shardCopy
 	}
+	tmpStates := make(map[shardcfg.Tshid]ShardMeta)
+	for s, m := range kv.shardStates {
+		tmpStates[s] = m
+	}
 	kv.mu.Unlock()
 
 	w := new(bytes.Buffer)
@@ -241,6 +247,11 @@ func (kv *KVServer) Snapshot() []byte {
 	err := e.Encode(tmp)
 	if err != nil {
 		log.Printf("KVServer %v data encode error: %v\n", kv.me, err)
+		return nil
+	}
+	err = e.Encode(tmpStates)
+	if err != nil {
+		log.Printf("KVServer %v states encode error: %v\n", kv.me, err)
 		return nil
 	}
 
@@ -254,13 +265,21 @@ func (kv *KVServer) Restore(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var tmp map[shardcfg.Tshid]map[string]KVData
-	if d.Decode(&tmp) != nil {
-		log.Printf("Fail to decode.\n")
-	} else {
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-		kv.shardKvMap = tmp
+	var tmpStates map[shardcfg.Tshid]ShardMeta
+	if err := d.Decode(&tmp); err != nil {
+		log.Printf("KVServer %v Restore decode data error: %v\n", kv.me, err)
+		return
 	}
+	if err := d.Decode(&tmpStates); err != nil {
+		log.Printf("KVServer %v Restore decode states error: %v\n", kv.me, err)
+		return
+	}
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.shardKvMap = tmp
+	kv.shardStates = tmpStates
+	// log.Printf("KVServer %v Restored states: %v\n", kv.me, kv.shardStates)
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -372,6 +391,7 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	labgob.Register(shardrpc.InstallShardArgs{})
 	labgob.Register(shardrpc.DeleteShardArgs{})
 	labgob.Register(rsm.Op{})
+	labgob.Register(ShardMeta{})
 
 	kv := &KVServer{gid: gid, me: me}
 
@@ -384,14 +404,14 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	// gid1 initialize all shards
 	if kv.gid == shardcfg.Gid1 {
 		for i := range shardcfg.NShards {
-			kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{state: ShardStateServing, num: 0}
+			kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{State: ShardStateServing, Num: 0}
 			kv.shardKvMap[shardcfg.Tshid(i)] = make(map[string]KVData)
 		}
 	} else {
 		// For other groups, initialize shards as Unknown state
 		// They will be set to Serving when they receive the configuration
 		for i := range shardcfg.NShards {
-			kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{state: ShardStateUnknown, num: 0}
+			kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{State: ShardStateUnknown, Num: 0}
 			kv.shardKvMap[shardcfg.Tshid(i)] = make(map[string]KVData)
 		}
 	}
