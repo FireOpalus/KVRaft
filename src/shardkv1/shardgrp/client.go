@@ -26,6 +26,8 @@ func (ck *Clerk) Get(key string, num shardcfg.Tnum) (string, rpc.Tversion, rpc.E
 	// Your code here
 	idx := ck.leaderId
 	args := rpc.GetArgs{Key: key}
+	retryCount := 0
+	maxRetries := 10
 
 	for {	
 		reply := rpc.GetReply{}
@@ -49,9 +51,14 @@ func (ck *Clerk) Get(key string, num shardcfg.Tnum) (string, rpc.Tversion, rpc.E
 			}
 		}
 
+		if retryCount >= maxRetries {
+			return "", 0, rpc.ErrWrongGroup
+		}
+
 		// wait if we have tried all servers
 		time.Sleep(10 * time.Millisecond)
 		idx = (idx + 1) % len(ck.servers)
+		retryCount++
 	}
 }
 
@@ -64,6 +71,8 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion, num shardcf
 			Value: value,
 			Version: version,
 		}
+	retryCount := 0
+	maxRetries := 10
 
 	for {
 		reply := rpc.PutReply{}
@@ -97,9 +106,14 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion, num shardcf
 
 		firstCall = false
 		
+		if retryCount >= maxRetries {
+			return rpc.ErrWrongGroup
+		}
+
 		// wait if we have tried all servers
 		time.Sleep(10 * time.Millisecond)
 		idx = (idx + 1) % len(ck.servers)
+		retryCount++
 	}
 }
 

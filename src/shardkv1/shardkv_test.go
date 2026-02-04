@@ -2,7 +2,6 @@ package shardkv
 
 import (
 	//"log"
-	"log"
 	"testing"
 	"time"
 
@@ -166,36 +165,26 @@ func TestJoinLeaveBasic5A(t *testing.T) {
 	if ok := ts.joinGroups(sck, []tester.Tgid{gid2}); !ok {
 		ts.t.Fatalf("TestJoinLeaveBasic5A: joinGroups failed")
 	}
-	log.Printf("1")
 	ts.checkShutdownSharding(gid1, ka, va)
-	log.Printf("2")
 	for i := 0; i < len(ka); i++ {
 		ts.CheckGet(ck, ka[i], va[i], rpc.Tversion(1))
 	}
-	log.Printf("3")
 	ts.leave(sck, shardcfg.Gid1)
 	if ok := ts.checkMember(sck, shardcfg.Gid1); ok {
 		ts.t.Fatalf("%d is a member after leave", shardcfg.Gid1)
 	}
-	log.Printf("4")
 	ts.Group(shardcfg.Gid1).Shutdown()
-	log.Printf("5")
 	for i := 0; i < len(ka); i++ {
 		ts.CheckGet(ck, ka[i], va[i], rpc.Tversion(1))
 	}
-	log.Printf("6")
 	// bring the crashed shard/group back to life.
 	ts.Group(shardcfg.Gid1).StartServers()
-	log.Printf("7")
 	// Rejoin
 	ts.join(sck, shardcfg.Gid1, ts.Group(shardcfg.Gid1).SrvNames())
-	log.Printf("8")
 	for i := 0; i < len(ka); i++ {
 		ts.CheckGet(ck, ka[i], va[i], rpc.Tversion(1))
 	}
-	log.Printf("9")
 	ts.checkShutdownSharding(gid2, ka, va)
-	log.Printf("10")
 }
 
 // test many groups joining and leaving, reliable or unreliable

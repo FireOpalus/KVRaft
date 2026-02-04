@@ -10,7 +10,6 @@ package shardkv
 
 import (
 	"time"
-	"log"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
@@ -74,7 +73,6 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 			time.Sleep(25 * time.Millisecond)
 			continue
 		}
-		log.Printf("9")
 		return value, version, err
 	}
 }
