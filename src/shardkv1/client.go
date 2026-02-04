@@ -9,7 +9,6 @@ package shardkv
 //
 
 import (
-	"log"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -57,18 +56,21 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 // responsible for key.  You can make a clerk for that group by
 // calling shardgrp.MakeClerk(ck.clnt, servers).
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	cfg := ck.sck.Query()
-	shard := shardcfg.Key2Shard(key)
-	_, servers, ok := cfg.GidServers(shard)
-	if !ok {
-		log.Fatalf("Client: Get shard servers error.")
-	}
-
 	for {
-		grpClerk := shardgrp.MakeClerk(ck.clnt, servers)
-		value, version, err := grpClerk.Get(key)
+		shard := shardcfg.Key2Shard(key)
+		gid := ck.cfg.Shards[shard]
+		grpClerk := ck.grpClerks[gid]
+
+		// clerk not found, update config
+		if grpClerk == nil {
+			ck.UpdateConfig()
+		}
+
+		value, version, err := grpClerk.Get(key, ck.cfg.Num)
+
 		if err == rpc.ErrWrongGroup {
-			time.Sleep(50 * time.Millisecond)
+			ck.UpdateConfig()
+			time.Sleep(25 * time.Millisecond)
 			continue
 		}
 		return value, version, err
@@ -77,21 +79,49 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
 // Put a key to a shard group.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	cfg := ck.sck.Query()
-	shard := shardcfg.Key2Shard(key)
-	_, servers, ok := cfg.GidServers(shard)
-	if !ok {
-		log.Fatalf("Client: Get shard servers error.")
-	}
-
 	for {
-		grpClerk := shardgrp.MakeClerk(ck.clnt, servers)
-		err := grpClerk.Put(key, value, version)
+		shard := shardcfg.Key2Shard(key)
+		gid := ck.cfg.Shards[shard]
+		grpClerk := ck.grpClerks[gid]
+
+		// clerk not found, update config
+		if grpClerk == nil {
+			ck.UpdateConfig()
+		}
+
+		// All shards are assigned to invalid groups, return an error to allow graceful exit
+		if gid == 0 || len(ck.cfg.Groups[gid]) == 0 {
+			return rpc.ErrNoKey
+		}
+
+		err := grpClerk.Put(key, value, version, ck.cfg.Num)
+
 		if err == rpc.ErrWrongGroup {
-			time.Sleep(50 * time.Millisecond)
+			ck.UpdateConfig()
+			time.Sleep(25 * time.Millisecond)
 			continue
 		}
+
+		if err == rpc.ErrVersion {
+			return rpc.ErrVersion
+		}
+
 		return err
 	}
 	
+}
+
+func (ck *Clerk) UpdateConfig() {
+	new := ck.sck.Query()
+	ck.cfg = new
+	// make clerks from new config
+	ck.grpClerks = make(map[tester.Tgid]*shardgrp.Clerk)
+	// cfg.groups
+	for gid, servers := range new.Groups {
+		if len(servers) == 0 {
+			ck.grpClerks[gid] = nil
+		} else {
+			ck.grpClerks[gid] = shardgrp.MakeClerk(ck.clnt, servers)
+		}
+	}
 }
