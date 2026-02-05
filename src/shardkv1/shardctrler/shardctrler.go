@@ -6,9 +6,9 @@ package shardctrler
 
 import (
 	"log"
-	"sync"
-
-	// "time"
+	"os"
+	"strconv"
+	"time"
 
 	"6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
@@ -20,6 +20,7 @@ import (
 
 var shardConfigName string = "shardconfig_curr"
 var shardConfigNextName string = "shardconfig_next"
+var controllerLockName string = "controller_mutex"
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -29,7 +30,8 @@ type ShardCtrler struct {
 	killed int32 // set by Kill()
 
 	// Your data here.
-	mu sync.Mutex
+	lock bool
+	id string
 }
 
 // Make a ShardCltler, which stores its state in a kvsrv.
@@ -38,6 +40,8 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 	srv := tester.ServerName(tester.GRP0, 0)
 	sck.IKVClerk = kvsrv.MakeClerk(clnt, srv)
 	// Your code here.
+	sck.lock = false
+	sck.id = strconv.FormatInt(time.Now().UnixNano() + int64(os.Getpid()) * 1e18, 10)
 	return sck
 }
 
@@ -98,12 +102,67 @@ func (sck *ShardCtrler) ApplyMigration(curr, next *shardcfg.ShardConfig) {
 	}
 }
 
+func (sck *ShardCtrler) AcquireLock() {
+	if sck.lock {
+		return
+	}
+
+	var str string
+	var ver rpc.Tversion
+	var err rpc.Err
+	for !sck.lock {
+		str, ver, err = sck.IKVClerk.Get(controllerLockName)
+		if err == rpc.OK && str == sck.id {
+			sck.lock = true
+			return
+		} else if err == rpc.ErrNoKey {
+			ver = 0
+		} else if err != rpc.OK || str != "" {
+			continue
+		}
+
+		err = sck.IKVClerk.Put(controllerLockName, sck.id, ver)
+		if err == rpc.OK {
+			sck.lock = true
+			return
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (sck *ShardCtrler) ReleaseLock() {
+	if !sck.lock {
+		return
+	}
+
+	var str string
+	var ver rpc.Tversion
+	var err rpc.Err
+	for sck.lock {
+		str, ver, err = sck.IKVClerk.Get(controllerLockName)
+		if str == "" {
+			sck.lock = false
+			return
+		}
+		
+		err = sck.IKVClerk.Put(controllerLockName, "", ver)
+		if err == rpc.OK {
+			sck.lock = false
+			return
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // The tester calls InitController() before starting a new
 // controller. In part A, this method doesn't need to do anything. In
 // B and C, this method implements recovery.
 func (sck *ShardCtrler) InitController() {
-	sck.mu.Lock()
-	defer sck.mu.Unlock()
+	// Acquire lock
+	sck.AcquireLock()
+	defer sck.ReleaseLock()
 
 	// 1. Check current config
 	currStr, currVer, err := sck.IKVClerk.Get(shardConfigName)
@@ -138,8 +197,6 @@ func (sck *ShardCtrler) InitController() {
 // lists shardgrp shardcfg.Gid1 for all shards.
 func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	// Your code here
-	sck.mu.Lock()
-	defer sck.mu.Unlock()
 
 	err := sck.IKVClerk.Put(shardConfigName, cfg.String(), 0)
 	for err != rpc.OK {
@@ -154,8 +211,10 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // changes the configuration it may be superseded by another
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
-	sck.mu.Lock()
-	defer sck.mu.Unlock()
+
+	// Acquire lock
+	sck.AcquireLock()
+	defer sck.ReleaseLock()
 
 	// get cfg
 	str, version, err := sck.IKVClerk.Get(shardConfigName)
@@ -202,9 +261,6 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 // Return the current configuration
 func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 	// Your code here.
-	sck.mu.Lock()
-	defer sck.mu.Unlock()
-
 	str, _, err := sck.IKVClerk.Get(shardConfigName)
 	if err != rpc.OK {
 		log.Fatalf("ShardCtrler: fail to read config.")
