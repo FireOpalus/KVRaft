@@ -107,7 +107,11 @@ func (kv *KVServer) DoPut(req rpc.PutArgs) any {
 			kv.shardKvMap[shard][req.Key] = kvdata
 			res.Err = rpc.OK
 		} else {
-			res.Err = rpc.ErrVersion
+			if req.Version+1 == kvdata.Version && req.Value == kvdata.Value {
+				res.Err = rpc.OK
+			} else {
+				res.Err = rpc.ErrVersion
+			}
 		}
 	}
 	return res
@@ -151,6 +155,10 @@ func (kv *KVServer) DoFreezeShard(req shardrpc.FreezeShardArgs) any {
 func (kv *KVServer) DoInstallShard(req shardrpc.InstallShardArgs) any {
 	// check shard
 	s, ok := kv.shardStates[req.Shard]
+	if ok && s.Num >= req.Num {
+		return shardrpc.InstallShardReply{Err: rpc.OK}
+	}
+
 	if !ok || (s.State != ShardStateUnknown && s.State != ShardStateDeleted && s.Num < req.Num) {
 		return shardrpc.InstallShardReply{Err: rpc.ErrWrongGroup}
 	}
@@ -399,20 +407,29 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	kv.shardKvMap = make(map[shardcfg.Tshid]map[string]KVData)
 	kv.shardStates = make(map[shardcfg.Tshid]ShardMeta)
 	kv.clientPutResults = make(map[int64]ClientPutResult)
+	
+	// Only initialize from scratch if we didn't restore a snapshot.
+	// If we have a snapshot, rsm.MakeRSM called Restore() already.
+	// If we have logs but no snapshot, we need to initialize to genesis state
+	// so that log replay works correctly on top of it.
+	hasSnapshot := persister.SnapshotSize() > 0
+
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 
 	// gid1 initialize all shards
-	if kv.gid == shardcfg.Gid1 {
-		for i := range shardcfg.NShards {
-			kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{State: ShardStateServing, Num: 0}
-			kv.shardKvMap[shardcfg.Tshid(i)] = make(map[string]KVData)
-		}
-	} else {
-		// For other groups, initialize shards as Unknown state
-		// They will be set to Serving when they receive the configuration
-		for i := range shardcfg.NShards {
-			kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{State: ShardStateUnknown, Num: 0}
-			kv.shardKvMap[shardcfg.Tshid(i)] = make(map[string]KVData)
+	if !hasSnapshot {
+		if kv.gid == shardcfg.Gid1 {
+			for i := range shardcfg.NShards {
+				kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{State: ShardStateServing, Num: 0}
+				kv.shardKvMap[shardcfg.Tshid(i)] = make(map[string]KVData)
+			}
+		} else {
+			// For other groups, initialize shards as Unknown state
+			// They will be set to Serving when they receive the configuration
+			for i := range shardcfg.NShards {
+				kv.shardStates[shardcfg.Tshid(i)] = ShardMeta{State: ShardStateUnknown, Num: 0}
+				kv.shardKvMap[shardcfg.Tshid(i)] = make(map[string]KVData)
+			}
 		}
 	}
 

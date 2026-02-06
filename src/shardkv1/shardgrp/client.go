@@ -119,6 +119,9 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion, num shardcf
 
 func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
 	idx := ck.leaderId
+	retryCount := 0
+	const maxRetries = 10
+
 	for {
 		args := shardrpc.FreezeShardArgs{
 			Shard: s,
@@ -145,12 +148,18 @@ func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.E
 
 		if idx == ck.leaderId {
 			time.Sleep(10 * time.Millisecond)
+			retryCount++
+			if retryCount > maxRetries {
+				return nil, rpc.ErrWrongLeader
+			}
 		}
 	}
 }
 
 func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
 	idx := ck.leaderId
+	retryCount := 0
+	const maxRetries = 10
 	for {
 		args := shardrpc.InstallShardArgs{
 			Shard: s,
@@ -174,12 +183,18 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 
 		if idx == ck.leaderId {
 			time.Sleep(10 * time.Millisecond)
+			retryCount++
+			if retryCount > maxRetries {
+				return rpc.ErrWrongLeader
+			}
 		}
 	}
 }
 
 func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 	idx := ck.leaderId
+	retryCount := 0
+	const maxRetries = 10
 	for {
 		args := shardrpc.DeleteShardArgs{
 			Shard: s,
@@ -188,7 +203,7 @@ func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 		reply := shardrpc.DeleteShardReply{}
 
 		ok := ck.clnt.Call(ck.servers[idx], "KVServer.DeleteShard", &args, &reply)
-if reply.Err == rpc.ErrWrongGroup {
+		if reply.Err == rpc.ErrWrongGroup {
 			ck.leaderId = idx
 			return reply.Err
 		} else 
@@ -200,6 +215,10 @@ if reply.Err == rpc.ErrWrongGroup {
 
 		if idx == ck.leaderId {
 			time.Sleep(10 * time.Millisecond)
+			retryCount++
+			if retryCount > maxRetries {
+				return rpc.ErrWrongLeader
+			}
 		}
 	}
 }
