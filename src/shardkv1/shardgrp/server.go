@@ -107,7 +107,11 @@ func (kv *KVServer) DoPut(req rpc.PutArgs) any {
 			kv.shardKvMap[shard][req.Key] = kvdata
 			res.Err = rpc.OK
 		} else {
-			res.Err = rpc.ErrVersion
+			if req.Version+1 == kvdata.Version && req.Value == kvdata.Value {
+				res.Err = rpc.OK
+			} else {
+				res.Err = rpc.ErrVersion
+			}
 		}
 	}
 	return res
@@ -151,6 +155,10 @@ func (kv *KVServer) DoFreezeShard(req shardrpc.FreezeShardArgs) any {
 func (kv *KVServer) DoInstallShard(req shardrpc.InstallShardArgs) any {
 	// check shard
 	s, ok := kv.shardStates[req.Shard]
+	if ok && s.Num >= req.Num {
+		return shardrpc.InstallShardReply{Err: rpc.OK}
+	}
+
 	if !ok || (s.State != ShardStateUnknown && s.State != ShardStateDeleted && s.Num < req.Num) {
 		return shardrpc.InstallShardReply{Err: rpc.ErrWrongGroup}
 	}
