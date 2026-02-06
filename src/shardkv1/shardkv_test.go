@@ -165,34 +165,25 @@ func TestJoinLeaveBasic5A(t *testing.T) {
 	if ok := ts.joinGroups(sck, []tester.Tgid{gid2}); !ok {
 		ts.t.Fatalf("TestJoinLeaveBasic5A: joinGroups failed")
 	}
-
 	ts.checkShutdownSharding(gid1, ka, va)
-
 	for i := 0; i < len(ka); i++ {
 		ts.CheckGet(ck, ka[i], va[i], rpc.Tversion(1))
 	}
-
 	ts.leave(sck, shardcfg.Gid1)
 	if ok := ts.checkMember(sck, shardcfg.Gid1); ok {
 		ts.t.Fatalf("%d is a member after leave", shardcfg.Gid1)
 	}
-
 	ts.Group(shardcfg.Gid1).Shutdown()
-
 	for i := 0; i < len(ka); i++ {
 		ts.CheckGet(ck, ka[i], va[i], rpc.Tversion(1))
 	}
-
 	// bring the crashed shard/group back to life.
 	ts.Group(shardcfg.Gid1).StartServers()
-
 	// Rejoin
 	ts.join(sck, shardcfg.Gid1, ts.Group(shardcfg.Gid1).SrvNames())
-
 	for i := 0; i < len(ka); i++ {
 		ts.CheckGet(ck, ka[i], va[i], rpc.Tversion(1))
 	}
-
 	ts.checkShutdownSharding(gid2, ka, va)
 }
 
