@@ -1,0 +1,12 @@
+{
+    "go.gopath": "",
+     "[go]": {
+
+        "editor.formatOnSave": false,
+
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "never"
+        }
+
+    },
+}
