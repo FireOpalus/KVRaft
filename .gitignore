@@ -3,3 +3,5 @@
 src/main/test-mr-many.sh
 src/main/test-mr.sh
 .gitignore
+kv-client
+kv-server
