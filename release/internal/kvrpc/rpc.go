@@ -3,33 +3,33 @@ package rpc
 type Err string
 
 const (
-OK         = "OK"
-ErrNoKey   = "ErrNoKey"
-ErrVersion = "ErrVersion"
-ErrMaybe = "ErrMaybe"
-ErrWrongLeader = "ErrWrongLeader"
-ErrWrongGroup  = "ErrWrongGroup"
-ErrOutDated = "ErrOutDated"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrVersion     = "ErrVersion"
+	ErrMaybe       = "ErrMaybe"
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrWrongGroup  = "ErrWrongGroup"
+	ErrOutDated    = "ErrOutDated"
 )
 
 type Tversion uint64
 
 type PutArgs struct {
-Key     string
-Value   string
-Version Tversion
+	Key     string
+	Value   string
+	Version Tversion
 }
 
 type PutReply struct {
-Err Err
+	Err Err
 }
 
 type GetArgs struct {
-Key string
+	Key string
 }
 
 type GetReply struct {
-Value   string
-Version Tversion
-Err     Err
+	Value   string
+	Version Tversion
+	Err     Err
 }
