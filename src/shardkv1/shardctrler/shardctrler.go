@@ -5,8 +5,9 @@ package shardctrler
 //
 
 import (
-	"encoding/binary"
 	"log"
+	"math/rand"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,8 @@ type ShardCtrler struct {
 	killed       int32 // set by Kill()
 	leases       bool
 	leaseVersion rpc.Tversion
+	leaseExpiry  time.Time
+	id           string
 
 	grpsClerks map[tester.Tgid]*shardgrp.Clerk // one clerk for each shard group
 }
@@ -41,24 +44,10 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 	sck := &ShardCtrler{clnt: clnt}
 	srv := tester.ServerName(tester.GRP0, 0)
 	sck.IKVClerk = kvsrv.MakeClerk(clnt, srv)
+	sck.id = strconv.FormatInt(rand.Int63(), 16) + strconv.FormatInt(time.Now().UnixNano(), 16)
 
 	sck.grpsClerks = make(map[tester.Tgid]*shardgrp.Clerk)
 	return sck
-}
-
-func serializeLease(t time.Time) string {
-	buf := make([]byte, binary.MaxVarintLen64)
-	n := binary.PutVarint(buf, t.UnixMilli())
-	return string(buf[:n])
-}
-
-func parseLease(val string) time.Time {
-	buf := []byte(val)
-	ms, n := binary.Varint(buf)
-	if n <= 0 {
-		return time.UnixMilli(0)
-	}
-	return time.UnixMilli(ms)
 }
 
 // ensureGrpClerksFor makes sure sck.grpsClerks has a clerk for every group in cfg.
@@ -194,34 +183,31 @@ func (sck *ShardCtrler) ApplyMigration(curr, next *shardcfg.ShardConfig, curVers
 }
 
 func (sck *ShardCtrler) AcquireLock() {
-	for {
-		val, ver, _ := sck.IKVClerk.Get(controllerLockName)
-		// 如果 key 不存在或为空，expiry 为 0 时间，必然小于 Now
-		expiry := parseLease(val)
-		now := time.Now()
-		newExpiry := time.UnixMilli(now.Add(LeaseDuration).UnixMilli())
-		newVal := serializeLease(newExpiry)
+	ck, ok := sck.IKVClerk.(*kvsrv.Clerk)
+	if !ok {
+		log.Fatalf("IKVClerk is not *kvsrv.Clerk")
+	}
 
-		// 如果租约已过期，尝试获取锁
-		if now.After(expiry) {
-			// 尝试 CAS 更新
-			err := sck.IKVClerk.Put(controllerLockName, newVal, ver)
-			if err == rpc.OK {
-				sck.leaseVersion = ver + 1
-				return
-			}
-			if err == rpc.ErrMaybe {
-				val2, ver2, _ := sck.IKVClerk.Get(controllerLockName)
-				if ver2 == ver+1 && val2 == newVal {
-					// Acquire lock successfully.
-					sck.leaseVersion = ver + 1
-					return
-				}
-			}
-			// 如果 Put 失败（版本不匹配），说明锁被别人更新了，继续循环
+	for !sck.isKilled() {
+		// Attempt to create the lock (Version 0)
+		err := ck.PutTTL(controllerLockName, sck.id, 0, LeaseDuration)
+		if err == rpc.OK {
+			sck.leaseVersion = 1
+			sck.leaseExpiry = time.Now().Add(LeaseDuration)
+			return
 		}
 
-		// 锁未过期，等待重试
+		if err == rpc.ErrMaybe {
+			// Check if we actually acquired it
+			val, ver, gerr := sck.IKVClerk.Get(controllerLockName)
+			if gerr == rpc.OK && val == sck.id {
+				sck.leaseVersion = ver
+				sck.leaseExpiry = time.Now().Add(LeaseDuration)
+				return
+			}
+		}
+
+		// Lock held by others, wait
 		time.Sleep(50 * time.Millisecond)
 	}
 }
@@ -230,38 +216,50 @@ func (sck *ShardCtrler) isHoldingLock() bool {
 	if !sck.leases {
 		return true
 	}
-
-	val, version, _ := sck.IKVClerk.Get(controllerLockName)
-	if version != sck.leaseVersion || time.Now().After(parseLease(val)) {
-		return false
-	}
-	return true
+	return time.Now().Before(sck.leaseExpiry)
 }
 
 func (sck *ShardCtrler) renew() bool {
-	val, version, _ := sck.IKVClerk.Get(controllerLockName)
-
-	if version != sck.leaseVersion || time.Now().After(parseLease(val)) {
-		// Not a lease holder.
+	if sck.isKilled() {
+		return false
+	}
+	ck, ok := sck.IKVClerk.(*kvsrv.Clerk)
+	if !ok {
+		return false
+	}
+	if time.Now().After(sck.leaseExpiry) {
 		return false
 	}
 
 	for {
-		leaseTime := serializeLease(time.Now().Add(LeaseDuration))
-		err := sck.IKVClerk.Put(controllerLockName, leaseTime, version)
+		err := ck.PutTTL(controllerLockName, sck.id, sck.leaseVersion, LeaseDuration)
 		if err == rpc.OK {
-			break
+			sck.leaseVersion++ // Server increments version
+			sck.leaseExpiry = time.Now().Add(LeaseDuration)
+			return true
 		}
 		if err == rpc.ErrMaybe {
-			val2, ver2, _ := sck.IKVClerk.Get(controllerLockName)
-			if ver2 == version+1 && val2 == leaseTime {
-				break
+			val, ver, gerr := sck.IKVClerk.Get(controllerLockName)
+			if gerr == rpc.OK {
+				if ver == sck.leaseVersion+1 && val == sck.id {
+					// Renew succeeded
+					sck.leaseVersion++
+					sck.leaseExpiry = time.Now().Add(LeaseDuration)
+					return true
+				}
+				if ver > sck.leaseVersion+1 || val != sck.id {
+					// Lost ownership
+					return false
+				}
+				// Else retry
+				continue
 			}
 		}
+		if err == rpc.ErrVersion || err == rpc.ErrNoKey {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-
-	sck.leaseVersion = version + 1
-	return true
 }
 
 func (sck *ShardCtrler) startAutoRenew() (stop func()) {
@@ -284,24 +282,13 @@ func (sck *ShardCtrler) startAutoRenew() (stop func()) {
 }
 
 func (sck *ShardCtrler) ReleaseLock() {
-	for {
-		_, ver, _ := sck.IKVClerk.Get(controllerLockName)
-		now := serializeLease(time.Now())
-
-		// 尝试置空释放
-		// 注意：这里用 time.UnixMilli(0) 表示 0 时间，即立即过期
-		err := sck.IKVClerk.Put(controllerLockName, now, ver)
-		if err == rpc.OK {
-			return
-		}
-		if err == rpc.ErrMaybe {
-			val2, ver2, _ := sck.IKVClerk.Get(controllerLockName)
-			if ver2 == ver+1 && val2 == now {
-				return
-			}
-		}
-		// 如果 Put 失败，可能是发生了变化，循环重试检查
+	ck, ok := sck.IKVClerk.(*kvsrv.Clerk)
+	if !ok {
+		return
 	}
+	// Expire immediately (1ms)
+	ck.PutTTL(controllerLockName, sck.id, sck.leaseVersion, 1*time.Millisecond)
+	sck.leaseExpiry = time.Time{}
 }
 
 // The tester calls InitController() before starting a new
@@ -341,7 +328,6 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	// Your code here
 	sck.IKVClerk.Put(shardConfigName, cfg.String(), 0)
 	sck.IKVClerk.Put(shardConfigNextName, cfg.String(), 0)
-	sck.IKVClerk.Put(controllerLockName, serializeLease(time.Now()), 0)
 	sck.leases = false
 
 	// Initialize the group clerks for each group

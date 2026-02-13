@@ -4,10 +4,9 @@ import (
 	"time"
 
 	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
 )
-
 
 type Clerk struct {
 	clnt   *tester.Clnt
@@ -63,6 +62,10 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
+	return ck.PutTTL(key, value, version, 0)
+}
+
+func (ck *Clerk) PutTTL(key, value string, version rpc.Tversion, ttl time.Duration) rpc.Err {
 	// You will have to modify this function.
 	isfirst := false
 	for {
@@ -70,6 +73,7 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 		args.Key = key
 		args.Value = value
 		args.Version = version
+		args.TTLMs = int64(ttl / time.Millisecond)
 		reply := rpc.PutReply{}
 
 		ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)

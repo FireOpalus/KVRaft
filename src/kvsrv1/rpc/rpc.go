@@ -25,6 +25,7 @@ type PutArgs struct {
 	Key     string
 	Value   string
 	Version Tversion
+	TTLMs   int64
 }
 
 type PutReply struct {
@@ -40,4 +41,3 @@ type GetReply struct {
 	Version Tversion
 	Err     Err
 }
-
